@@ -403,6 +403,57 @@ def test_reading_failure_keeps_the_entry_unverified(monkeypatch, ctx):
     assert ctx.library.get(res.entry.key).status == STATUS_UNVERIFIED
 
 
+# --------------------------------------------------------------------------
+# A re-read that fails costs nothing but the attempt
+#
+# Both failure branches store a freshly built entry, which carries no summaries
+# at all. Over an entry that had already been read that is silent data loss:
+# exit code 0, and a verified card comes back blank.
+# --------------------------------------------------------------------------
+
+def test_a_failed_fetch_does_not_destroy_the_reading_already_on_record(
+        monkeypatch, ctx):
+    """`lit reread` with the PDF route unreachable used to blank the entry."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+    found = ctx.library.get("vaswani2017attention")
+    found.code_url = "https://github.com/found/here"
+    found.code_source = CODE_FROM_WEB
+    ctx.library.save_entry(found)
+
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=None)
+    res = reread(ctx, "vaswani2017attention")
+
+    stored = ctx.library.get("vaswani2017attention")
+    assert stored.status == STATUS_VERIFIED
+    assert stored.one_liner == "Introduces the Transformer."
+    assert stored.sections[0].name == "Introduction"
+    assert stored.key_findings == ["28.4 BLEU on WMT 2014"]
+    assert stored.tags == ["transformers", "self-attention"]
+    assert stored.code_url == "https://github.com/found/here"
+    # …and the report says the fetch failed without claiming the entry fell back.
+    assert "UNVERIFIED" not in res.message
+    assert any("full text could not be retrieved" in w for w in res.warnings)
+
+
+def test_a_failed_reading_step_does_not_destroy_the_one_already_on_record(
+        monkeypatch, ctx):
+    """The text arrived, the reader fell over; the earlier reading still stands."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(fail=True))
+    res = reread(ctx, "vaswani2017attention")
+
+    assert res.status == "error"
+    stored = ctx.library.get("vaswani2017attention")
+    assert stored.status == STATUS_VERIFIED
+    assert stored.one_liner == "Introduces the Transformer."
+    assert stored.sections[0].name == "Introduction"
+    assert stored.key_findings == ["28.4 BLEU on WMT 2014"]
+
+
 def test_references_come_from_metadata_not_the_model(monkeypatch, ctx):
     from lit.models import Reference
 
