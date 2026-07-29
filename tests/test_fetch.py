@@ -194,3 +194,68 @@ def test_merging_a_supplementary_record_preserves_the_authoritative_one():
     assert arxiv_record.year == 2017
     assert arxiv_record.venue is None
     assert arxiv_record.citation_count == 6597   # metrics adopted
+
+
+# --------------------------------------------------------------------------
+# Citation counts: indexes undercount, so the largest figure wins
+# --------------------------------------------------------------------------
+
+def test_merge_takes_the_larger_citation_count():
+    """OpenAlex holds arXiv-only work as a bare preprint record the citing
+    literature never points at, so its count runs orders of magnitude low: 9 for
+    GAIA against 1032 at S2. Filling only when the field is empty would keep
+    whichever source answered first."""
+    openalex = make_meta(citation_count=9)
+    s2 = make_meta(citation_count=1032)
+
+    assert openalex.merge(s2).citation_count == 1032
+
+
+def test_merge_does_not_let_a_thinner_index_lower_the_count():
+    s2 = make_meta(citation_count=1032)
+    openalex = make_meta(citation_count=9)
+
+    assert s2.merge(openalex).citation_count == 1032
+
+
+def test_merge_still_adopts_a_count_when_it_has_none():
+    assert make_meta(citation_count=None).merge(make_meta(citation_count=42)) \
+        .citation_count == 42
+
+
+def test_resolve_asks_s2_for_a_count_even_when_references_are_in_hand(monkeypatch):
+    """The count is worth its own request. S2 used to be a references-only
+    fallback, so a paper whose references OpenAlex had already supplied never
+    reached it and kept the preprint-record count — which left GAIA on 9
+    citations, three citations/year, below the B threshold in `quality.assess`."""
+    from lit.models import Reference
+    import lit.fetch.metadata as md
+
+    calls = []
+
+    def fake_arxiv(http, arxiv_id):
+        return make_meta(title="GAIA: a benchmark for General AI Assistants",
+                         doi=None, venue=None, year=2023, type="preprint",
+                         arxiv_id=arxiv_id, citation_count=None, references=[])
+
+    def fake_openalex(http, **kw):
+        calls.append("openalex")
+        m = make_meta(title="GAIA: a benchmark for General AI Assistants",
+                      doi=None, venue=None, year=2023, citation_count=9,
+                      references=[Reference(title="A cited work")])
+        m.title_matched = True
+        return m
+
+    def fake_s2(http, ident, api_key="", with_references=True):
+        calls.append(("s2", ident, with_references))
+        return make_meta(citation_count=1032, references=[])
+
+    monkeypatch.setattr(md, "from_arxiv", fake_arxiv)
+    monkeypatch.setattr(md, "from_openalex", fake_openalex)
+    monkeypatch.setattr(md, "from_semantic_scholar", fake_s2)
+
+    meta = md.resolve_metadata(http=None, arxiv_id="2311.12983")
+
+    assert meta.citation_count == 1032
+    # ...and we did not pay for a reference list OpenAlex had already given us.
+    assert ("s2", "arXiv:2311.12983", False) in calls
