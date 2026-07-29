@@ -143,9 +143,11 @@ lit import theirs.litlib --into my-library
 
 ## Setup, if `lit` isn't there
 
+`lit` is not on PyPI — it installs from its repository:
+
 ```bash
-lit libs || pipx install literature-agent    # or: uv tool install literature-agent
-lit new <name> --scope "<topic>"             # create the user's first library
+lit libs || uv tool install git+https://github.com/paolosyloslabini/LiteratureAgent.git
+lit new <name> --scope "<topic>"    # create the user's first library
 ```
 """
 

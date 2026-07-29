@@ -26,15 +26,29 @@ Needs Python 3.10+ and the [Claude Code](https://claude.com/claude-code) CLI —
 `lit` shells out to `claude -p` for every LLM call, so it uses your existing
 Claude authentication and needs no API key.
 
+Not published to PyPI — install straight from the repository:
+
 ```bash
-uv tool install literature-agent      # or: pipx install literature-agent
-lit skill install                     # let Claude Code drive your libraries
+uv tool install git+https://github.com/paolosyloslabini/LiteratureAgent.git
+# or: pipx install git+https://github.com/paolosyloslabini/LiteratureAgent.git
+
+lit skill install     # let Claude Code drive your libraries
 ```
 
-From a clone:
+To work on it, clone and install editable so `lit` tracks your working tree:
+
+```bash
+git clone https://github.com/paolosyloslabini/LiteratureAgent.git
+cd LiteratureAgent
+uv tool install --editable .          # `lit` on PATH, follows your edits
+```
+
+Or in a plain virtualenv, without putting `lit` on your PATH:
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
+.venv/bin/python -m pytest            # 345 tests, no network, no API calls
+.venv/bin/lit --help
 ```
 
 ## Quick start

@@ -70,3 +70,10 @@ def test_skill_documents_refresh():
 def test_skill_explains_partial_reads():
     assert "partial_read" in SKILL_BODY
     assert "sampled" in SKILL_BODY
+
+
+def test_skill_does_not_claim_a_pypi_install():
+    """The package is not on PyPI; a bare `pip install literature-agent` fails."""
+    assert "pipx install literature-agent" not in SKILL_BODY
+    assert "uv tool install literature-agent" not in SKILL_BODY
+    assert "git+https://github.com/" in SKILL_BODY
