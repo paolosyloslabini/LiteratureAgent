@@ -296,24 +296,6 @@ class Store:
             "top_tags": sorted(tags.items(), key=lambda kv: -kv[1])[:20],
         }
 
-    def citing_entries(self, *, doi: str | None, arxiv_id: str | None,
-                       title: str | None) -> list[str]:
-        """Keys of library entries whose reference list contains this work."""
-        out: set[str] = set()
-        c = self.conn
-        if doi:
-            for r in c.execute("SELECT citing FROM refs WHERE LOWER(cited_doi)=?", (doi.lower(),)):
-                out.add(r["citing"])
-        if arxiv_id:
-            for r in c.execute("SELECT citing FROM refs WHERE cited_arxiv=?", (arxiv_id,)):
-                out.add(r["citing"])
-        if title:
-            for r in c.execute(
-                "SELECT citing FROM refs WHERE LOWER(cited_title)=?", (title.lower(),)
-            ):
-                out.add(r["citing"])
-        return sorted(out)
-
 
 # --------------------------------------------------------------------------
 # FTS5 query construction

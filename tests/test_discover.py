@@ -347,7 +347,7 @@ def test_alternate_phrasings_only_run_the_best_match_facet(ctx, monkeypatch):
 
     primary = {f for q, f, _ in asked if q == "graph neural networks"}
     alternate = {f for q, f, _ in asked if q == "message passing networks"}
-    assert primary == {f for f, _ in D.SEARCH_FACETS}
+    assert primary == set(D.SEARCH_FACETS)
     assert alternate == {"relevance"}
 
 

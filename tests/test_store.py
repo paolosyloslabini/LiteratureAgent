@@ -160,13 +160,6 @@ def test_stats(stocked):
     assert st["references"] >= 2
 
 
-def test_citing_entries(stocked):
-    with Store(stocked) as s:
-        s.sync()
-        citing = s.citing_entries(doi=None, arxiv_id="1706.03762", title=None)
-    assert "brown2020language" in citing
-
-
 def test_index_is_rebuildable(stocked):
     with Store(stocked) as s:
         s.sync()
