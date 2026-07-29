@@ -529,12 +529,18 @@ def cmd_reread(
     finally:
         ctx.close()
     if state.json_mode:
-        _emit(res.to_dict())
+        _emit({**res.to_dict(), "usage": ctx.usage.summary()})
         raise typer.Exit(0 if res.ok else 1)
+    # A failed re-read can still have paid for a fetch and a partial read, so the
+    # footer goes out before the error exit too.
     if not res.ok:
         console.print(f"[red]{res.status}:[/red] {res.message}")
+        if footer := _usage_footer(ctx):
+            console.print(f"[dim]{footer}[/dim]")
         raise typer.Exit(1)
     console.print(entry_panel(res.entry))
+    if footer := _usage_footer(ctx):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command("refresh")
@@ -583,7 +589,7 @@ def cmd_inbox(
         ctx.close()
 
     if state.json_mode:
-        _emit(res.to_dict())
+        _emit({**res.to_dict(), "usage": ctx.usage.summary()})
         return
     if not res.items:
         console.print(
@@ -771,22 +777,26 @@ def cmd_search(
         ctx.close()
 
     if state.json_mode:
-        _emit(res.to_dict())
+        _emit({**res.to_dict(), "usage": ctx.usage.summary()})
         return
     if res.answer:
         console.print(Panel(res.answer, title="Short answer", border_style="cyan"))
+    # Ranking can run and still return nothing relevant, so the empty case has
+    # usually been paid for. Every path falls through to the footer.
     if not res.matches:
         console.print("[dim]No matching entries.[/dim]")
-        return
-    console.print(entries_table(
-        [m.entry for m in res.matches],
-        show_why={m.entry.key: m.why for m in res.matches},
-    ))
-    if res.gaps:
-        console.print("\n[bold]Gaps in the library[/bold]")
-        for g in res.gaps:
-            console.print(f"  · {g}")
-        console.print(f'[dim]Fill them:  lit find "{query}"[/dim]')
+    else:
+        console.print(entries_table(
+            [m.entry for m in res.matches],
+            show_why={m.entry.key: m.why for m in res.matches},
+        ))
+        if res.gaps:
+            console.print("\n[bold]Gaps in the library[/bold]")
+            for g in res.gaps:
+                console.print(f"  · {g}")
+            console.print(f'[dim]Fill them:  lit find "{query}"[/dim]')
+    if footer := _usage_footer(ctx):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command("ask")
