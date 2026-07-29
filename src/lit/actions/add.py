@@ -222,15 +222,24 @@ def add_paper(
 
     if ft is None:
         entry.status = STATUS_UNVERIFIED
+        # A fetch that fails must not cost a reading already paid for: the
+        # entry keeps it, and only the retrieval is reported as having failed.
+        if existing:
+            _carry_reading(entry, existing)
+            _carry_code(entry, existing)
+        kept = entry.is_verified
         warnings.append(
-            "full text could not be retrieved — summaries left blank. "
-            f"Drop the PDF in {lib.inbox_dir} and run `lit inbox`, "
+            "full text could not be retrieved — "
+            + ("the reading already on record was kept."
+               if kept else "summaries left blank.")
+            + f" Drop the PDF in {lib.inbox_dir} and run `lit inbox`, "
             "or re-add with --pdf <file>."
         )
         saved = lib.save_entry(entry)
         return AddResult(
             "updated" if existing else "added",
-            f"[{key}] added as UNVERIFIED (no full text available)",
+            f"[{key}] kept its existing reading (no full text available)" if kept
+            else f"[{key}] added as UNVERIFIED (no full text available)",
             entry=saved, verdict=verdict, meta=meta, warnings=warnings,
         )
 
@@ -272,6 +281,13 @@ def add_paper(
         )
     except LLMError as exc:
         entry.status = STATUS_UNVERIFIED
+        # The text was in hand and only the reader fell over, so the reading
+        # already on record is still the best one there is: it stays. The fetch
+        # itself succeeded, so its own facts below are the fresh ones.
+        if existing:
+            _carry_reading(entry, existing)
+            _carry_code(entry, existing)
+        kept = entry.is_verified
         entry.read_source = ft.source
         entry.pdf_path = _rel(ft.pdf_path, lib.path)
         entry.text_chars = ft.chars
@@ -280,7 +296,8 @@ def add_paper(
         lib.save_entry(entry)
         return AddResult(
             "error",
-            f"[{key}] retrieved the full text but the reading step failed: {exc}",
+            f"[{key}] retrieved the full text but the reading step failed: {exc}"
+            + (" — the reading already on record was kept" if kept else ""),
             entry=entry, verdict=verdict, meta=meta, warnings=warnings,
         )
 
