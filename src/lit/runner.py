@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence, TypeVar
+from typing import Callable, Sequence, TypeVar
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -34,9 +34,7 @@ def run_parallel(
     fn: Callable[[T], R],
     *,
     workers: int = 4,
-    on_start: Callable[[int, T], None] | None = None,
     on_done: Callable[[TaskResult], None] | None = None,
-    stop_on_error: bool = False,
 ) -> list[TaskResult]:
     """Map `fn` over `items` concurrently, preserving input order in the result.
 
@@ -51,14 +49,10 @@ def run_parallel(
 
     if workers == 1:
         for i, item in enumerate(items):
-            if on_start:
-                on_start(i, item)
             try:
                 results[i].value = fn(item)
             except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
                 results[i].error = exc
-                if stop_on_error:
-                    break
             if on_done:
                 on_done(results[i])
         return results
@@ -66,8 +60,6 @@ def run_parallel(
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lit") as pool:
         futures = {}
         for i, item in enumerate(items):
-            if on_start:
-                on_start(i, item)
             futures[pool.submit(fn, item)] = i
         for fut in as_completed(futures):
             i = futures[fut]
@@ -79,12 +71,3 @@ def run_parallel(
                 with lock:
                     on_done(results[i])
     return results
-
-
-def values(results: Iterable[TaskResult]) -> list:
-    """Successful, non-None values, in input order."""
-    return [r.value for r in results if r.ok and r.value is not None]
-
-
-def errors(results: Iterable[TaskResult]) -> list[tuple[object, BaseException]]:
-    return [(r.item, r.error) for r in results if r.error is not None]

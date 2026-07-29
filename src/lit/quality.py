@@ -209,12 +209,11 @@ def passes_quality_bar(verdict: LevelVerdict, meta: PaperMeta, min_level: str,
     """Apply the library's admission policy. Returns (ok, explanation)."""
     from .models import meets_min_level
 
-    if meta.type in ("video", "other") and not allow_non_published:
-        if meta.type == "video":
-            return False, (
-                "non-published material (video); enable it with "
-                "`lit config set allow_non_published true` in this library"
-            )
+    if meta.type == "video" and not allow_non_published:
+        return False, (
+            "non-published material (video); enable it with "
+            "`lit config set --library allow_non_published true`"
+        )
 
     if verdict.needs_judgement:
         return True, "unranked but admitted (no metrics available yet)"

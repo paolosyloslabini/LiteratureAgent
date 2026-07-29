@@ -70,8 +70,6 @@ class Section:
 
     @classmethod
     def coerce(cls, raw: Any) -> "Section | None":
-        if isinstance(raw, Section):
-            return raw
         if isinstance(raw, dict):
             name = str(raw.get("name") or raw.get("section") or "").strip()
             summary = str(raw.get("summary") or raw.get("text") or "").strip()
@@ -94,8 +92,6 @@ class Reference:
 
     @classmethod
     def coerce(cls, raw: Any) -> "Reference | None":
-        if isinstance(raw, Reference):
-            return raw
         if isinstance(raw, dict):
             title = str(raw.get("title") or "").strip()
             if not title:
@@ -223,21 +219,6 @@ class Entry:
         if not self.sections:
             return ""
         return "\n\n".join(f"### {s.name}\n\n{s.summary}".strip() for s in self.sections)
-
-    def searchable_text(self) -> str:
-        """Everything a full-text query should be able to match on."""
-        parts = [
-            self.title,
-            " ".join(self.authors),
-            self.venue or "",
-            self.abstract,
-            self.one_liner or "",
-            " ".join(self.tags),
-            " ".join(self.key_findings),
-            self.detailed_summary_md(),
-            self.notes,
-        ]
-        return "\n".join(p for p in parts if p)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

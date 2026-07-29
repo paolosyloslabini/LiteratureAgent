@@ -31,7 +31,6 @@ from ..models import (
     STATUS_UNVERIFIED,
     STATUS_VERIFIED,
     Entry,
-    Reference,
     Section,
     make_key,
     normalize_code_url,
@@ -45,11 +44,7 @@ from ..prompts import (
 )
 from ..quality import LevelVerdict, assess, passes_quality_bar
 from ..runner import run_parallel
-from .context import DEFAULT_READ_CHARS, Ctx, Target, parse_target
-
-# Kept as a name for callers that imported it. The live budget is
-# `Ctx.read_budget`, which reads `llm.read_chars`.
-MAX_PROMPT_CHARS = DEFAULT_READ_CHARS
+from .context import Ctx, Target, parse_target
 
 
 @dataclass
@@ -594,10 +589,3 @@ def read_entries(ctx: Ctx, entries: list[Entry]) -> list[AddResult]:
             entry: Entry = r.item  # type: ignore[assignment]
             out.append(AddResult("error", f"[{entry.key}] {r.error}"))
     return out
-
-
-def make_reference(meta: PaperMeta) -> Reference:
-    return Reference(
-        title=meta.title, year=meta.year, doi=meta.doi, arxiv_id=meta.arxiv_id,
-        authors=list(meta.authors),
-    )

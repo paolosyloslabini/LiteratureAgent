@@ -12,7 +12,6 @@ that entry or becomes a new one.
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -210,11 +209,3 @@ def _match_entry(item: InboxItem, unverified: list[Entry], lib) -> Entry | None:
         if stem and stem == slugify(e.key, 60):
             return e
     return None
-
-
-def stash(ctx: Ctx, pdf: Path) -> Path:
-    """Copy a PDF into the inbox for later processing."""
-    ctx.library.inbox_dir.mkdir(parents=True, exist_ok=True)
-    dest = ctx.library.inbox_dir / pdf.name
-    shutil.copy2(pdf, dest)
-    return dest
