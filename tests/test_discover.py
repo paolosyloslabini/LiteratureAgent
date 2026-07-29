@@ -19,6 +19,7 @@ from lit.actions.context import Ctx
 from lit.actions.discover import Candidate, discover, mine_references
 from lit.fetch.metadata import PaperMeta
 from lit.models import Reference, slugify
+from lit.prompts import rank_candidates_prompt
 from lit.runner import run_parallel
 
 # Captured before the `no_network` fixture stubs it out, so the tests that are
@@ -659,6 +660,18 @@ def test_mine_references_counts_a_duplicate_citation_once():
         [Reference(title="Twice In One Paper"), Reference(title="Twice In One Paper")],
     ])
     assert mine_references(entries, set(), set())[0].cocitations == 1
+
+
+def test_a_mined_candidate_reaches_the_ranker_with_its_abstract():
+    entries = build([[Reference(title="Cited Work")]])
+    mined = mine_references(entries, set(), set())
+    # What `_enrich` fills in from Semantic Scholar before the ranker runs.
+    mined[0].abstract = "We measure the thing the query is about."
+    card = rank_candidates_prompt(query="the thing", scope="", candidates=mined)
+    assert "abstract: We measure the thing" in card
+    # `cocitations` already renders that sentence — a note saying it again
+    # costs tokens and, worse, suppresses the abstract.
+    assert card.count("cited by 1 paper(s) already in this library") == 1
 
 
 def test_mined_and_scouted_candidates_merge(ctx):
