@@ -728,6 +728,7 @@ _LEVEL_ARGV = [
     ("code", "--all", "--level", "a"),
     ("search", "attention", "--level", "a"),
     ("ask", "what is attention?", "--level", "a"),
+    ("check", "--level", "a"),
 ]
 
 
@@ -735,7 +736,8 @@ _LEVEL_ARGV = [
 def test_an_unknown_level_is_rejected_before_anything_expensive(
         stocked, monkeypatch, argv):
     spent = []
-    for name in ("read_entries", "find_code", "search_action", "ask_action"):
+    for name in ("read_entries", "find_code", "search_action", "ask_action",
+                 "check_entries"):
         monkeypatch.setattr(f"lit.cli.{name}",
                             lambda *a, _n=name, **k: (spent.append(_n), [])[1])
     r = run("--json", *argv)

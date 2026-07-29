@@ -33,8 +33,44 @@ def test_venue_level(venue, level):
     assert (hit[0] if hit else None) == level
 
 
-def test_workshops_do_not_inherit_venue_rank():
-    assert venue_level("NeurIPS 2023 Workshop on Instruction Tuning") is None
+@pytest.mark.parametrize("venue", [
+    "NeurIPS 2023 Workshop on Instruction Tuning",
+    # The plural defeated `\bworkshop\b`, so a workshop paper here scored A*.
+    "NeurIPS 2023 Workshops",
+    "ICML Workshops",
+    "CHI Conference Companion",
+    "ACL Student Research Workshop",
+])
+def test_workshops_do_not_inherit_venue_rank(venue):
+    assert venue_level(venue) is None
+
+
+@pytest.mark.parametrize("venue", [
+    # `^nature\s` was written for the journal and matched the publisher.
+    "Nature Portfolio",
+    "Nature Publishing Group",
+    "Elsevier BV",
+    "Springer Science and Business Media LLC",
+    "Association for Computing Machinery",
+    # A preprint server says nothing the entry's own arxiv_id does not.
+    "arXiv",
+    "bioRxiv",
+])
+def test_a_publisher_or_preprint_server_is_not_a_ranked_venue(venue):
+    assert venue_level(venue) is None
+
+
+def test_a_venue_is_ranked_through_its_markup():
+    """Crossref serves some of these as escaped HTML."""
+    hit = venue_level("&lt;i&gt;Nature&lt;/i&gt;")
+    assert hit is not None and hit[0] == "A*"
+
+
+def test_a_workshop_paper_at_a_top_venue_is_capped():
+    """The end-to-end version of the plural bug: level, not just venue_level."""
+    v = assess(make_meta(venue="NeurIPS 2023 Workshops", type="conference paper",
+                         year=THIS_YEAR - 5, citation_count=30))
+    assert v.level != "A*"
 
 
 def test_citations_per_year():

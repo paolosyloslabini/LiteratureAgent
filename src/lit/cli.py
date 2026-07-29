@@ -27,6 +27,7 @@ from .actions.add import (
     reread as reread_action,
 )
 from .actions.ask import ask as ask_action
+from .actions.check import check_entries
 from .actions.claim import trace_claim
 from .actions.code import find_code
 from .actions.context import Ctx
@@ -852,6 +853,99 @@ def cmd_code(
             console.print(f"[dim]{r.key}: {r.message}[/dim]")
         else:
             console.print(f"[yellow]{r.key}:[/yellow] {r.message}")
+    if footer := _usage_footer(ctx):
+        console.print(f"[dim]{footer}[/dim]")
+
+
+@app.command("check")
+def cmd_check(
+    keys: list[str] = typer.Argument(
+        None, help="Entry keys to check. Omit to audit the whole library."),
+    fix: bool = typer.Option(
+        False, "--fix", help="Apply the corrections that could be confirmed."),
+    force: bool = typer.Option(
+        False, "--force", help="Check every entry, including ones that look fine."),
+    limit: int = typer.Option(
+        0, "-n", "--limit", help="Stop after this many (best levels first)."),
+    level: Optional[str] = typer.Option(
+        None, "--level", help="Only entries at this level or better."),
+    tag: Optional[str] = typer.Option(
+        None, "--tag", help="Only entries carrying this tag."),
+):
+    """Verify metadata that looks wrong, and optionally correct it.
+
+    Audits entries in code first — a publisher's name where a venue belongs, no
+    citations recorded for a decade-old paper, a year that predates the paper's
+    own preprint — then re-asks the metadata indexes, and spends one cheap agent
+    only on what they cannot settle. An entry nothing looks wrong with costs
+    nothing.
+
+    Reports by default. `--fix` writes, and only ever to bibliographic fields:
+    summaries, abstracts and your notes are never touched.
+    """
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
+    ctx = _ctx()
+    try:
+        lib = ctx.library
+        wanted: list[Entry] = []
+        missing: list[str] = []
+        if keys:
+            for k in keys:
+                entry = lib.get(k)
+                if entry is None:
+                    missing.append(k)
+                else:
+                    wanted.append(entry)
+        else:
+            wanted = lib.entries()
+            if level:
+                wanted = [e for e in wanted if level_rank(e.level) <= level_rank(level)]
+            if tag:
+                t = tag.strip().lower()
+                wanted = [e for e in wanted if t in [x.lower() for x in e.tags]]
+            wanted.sort(key=lambda e: (level_rank(e.level), -(e.citation_count or 0)))
+            if limit > 0:
+                wanted = wanted[:limit]
+
+        if missing:
+            _fail(f"no entry with key(s): {', '.join(missing)}")
+        if not wanted:
+            msg = "Nothing to check — this library has no entries."
+            if state.json_mode:
+                _emit({"checked": [], "message": msg})
+            else:
+                console.print(f"[dim]{msg}[/dim]")
+            return
+
+        results = check_entries(ctx, wanted, fix=fix, force=force)
+    finally:
+        ctx.close()
+
+    if state.json_mode:
+        _emit({"checked": [r.to_dict() for r in results],
+               "usage": ctx.usage.summary()})
+        return
+
+    changed = [r for r in results if r.status in ("fixed", "proposed")]
+    unresolved = [r for r in results if r.status == "unresolved"]
+    console.print(
+        f"\n[bold]{len(changed)}[/bold] of {len(results)} entr"
+        f"{'y' if len(results) == 1 else 'ies'} "
+        + ("corrected" if fix else "have corrections available")
+        + (f", {len(unresolved)} still unconfirmed" if unresolved else "")
+    )
+    for r in results:
+        if r.status in ("fixed", "proposed"):
+            console.print(f"[green]{r.key}[/green]: {'; '.join(r.changes)}")
+            if r.evidence:
+                console.print(f"  [dim]{r.evidence[:200]}[/dim]")
+        elif r.status == "unresolved":
+            console.print(f"[yellow]{r.key}:[/yellow] {'; '.join(r.unresolved)}")
+        elif r.status == "error":
+            console.print(f"[red]{r.key}:[/red] {r.message}")
+    if changed and not fix:
+        console.print("[dim]Nothing was written. Re-run with --fix to apply.[/dim]")
     if footer := _usage_footer(ctx):
         console.print(f"[dim]{footer}[/dim]")
 

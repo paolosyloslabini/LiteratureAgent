@@ -140,6 +140,10 @@ class Entry:
     status: str = STATUS_UNVERIFIED
     level: str = "unranked"
     level_reason: str = ""
+    # What `lit check` corrected on this entry and what confirmed it. Set only
+    # by that command, and only when it actually changed a field — an entry that
+    # has never needed correcting carries nothing here.
+    check_note: str = ""
 
     # The publisher's abstract, verbatim. Bibliographic metadata, not a summary:
     # it is copied from Crossref/arXiv/S2 and is never written by a model, so it

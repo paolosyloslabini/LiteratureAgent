@@ -33,6 +33,7 @@ from datetime import date
 
 from ..config import FetchConfig
 from ..models import Reference, normalize_arxiv, normalize_doi
+from ..venue import clean_venue, is_placeholder, is_workshop
 from .http import HttpClient
 
 CROSSREF_API = "https://api.crossref.org/works"
@@ -97,10 +98,22 @@ class PaperMeta:
 
     def merge(self, other: "PaperMeta") -> "PaperMeta":
         """Fill blanks from `other` without overwriting what we already trust."""
-        for f in ("title", "venue", "doi", "arxiv_id", "url", "abstract",
+        for f in ("title", "doi", "arxiv_id", "url", "abstract",
                   "oa_pdf_url", "pmcid", "bibtex"):
             if not getattr(self, f) and getattr(other, f):
                 setattr(self, f, getattr(other, f))
+        # Venue is deliberately not first-wins. Crossref is the primary record
+        # and is asked first, but it is also the source most likely to hold no
+        # usable venue for a work — a posted-content DOI has no
+        # `container-title` at all. Semantic Scholar is very often the one that
+        # knows the paper appeared at NeurIPS. Filling only when the field was
+        # empty meant whichever source answered first could pin it to a
+        # placeholder permanently.
+        if other.venue and (
+            not self.venue
+            or (is_placeholder(self.venue) and not is_placeholder(other.venue))
+        ):
+            self.venue = other.venue
         if self.year is None:
             self.year = other.year
         if not self.authors:
@@ -138,7 +151,7 @@ def from_crossref(http: HttpClient, doi: str) -> PaperMeta | None:
     meta.authors = [_crossref_author(a) for a in (m.get("author") or [])]
     meta.authors = [a for a in meta.authors if a]
     meta.doi = normalize_doi(m.get("DOI"))
-    meta.venue = _first(m.get("container-title")) or m.get("publisher")
+    meta.venue = _crossref_venue(m)
     meta.year = _crossref_year(m)
     meta.type = _map_crossref_type(m.get("type", ""), meta.venue)
     meta.url = m.get("URL")
@@ -212,7 +225,10 @@ def _arxiv_entry(entry, *, fallback_id: str = "") -> PaperMeta | None:
         meta.doi = normalize_doi(_text(doi_el))
     jref = entry.find("arxiv:journal_ref", _ATOM)
     if jref is not None and _text(jref):
-        meta.venue = _clean(_text(jref))
+        # The one field an arXiv record has that names where the work was
+        # actually published. Authors fill it in by hand, so it arrives in every
+        # shape: "NeurIPS 2017", a full proceedings title, or a bare "to appear".
+        meta.venue = clean_venue(_text(jref))
     return meta
 
 
@@ -242,7 +258,7 @@ def _s2_meta(data: dict, *, title_matched: bool = False) -> PaperMeta | None:
     meta.authors = [a.get("name", "") for a in (data.get("authors") or [])]
     meta.authors = [a for a in meta.authors if a]
     meta.year = data.get("year")
-    meta.venue = data.get("venue") or None
+    meta.venue = clean_venue(data.get("venue"))
     meta.citation_count = data.get("citationCount")
     meta.abstract = _clean(data.get("abstract") or "")
     ext = data.get("externalIds") or {}
@@ -509,7 +525,7 @@ def search_crossref(http: HttpClient, query: str, limit: int = 10, *,
         meta.title = _strip_tags(title)
         meta.authors = [a for a in (_crossref_author(a) for a in m.get("author") or []) if a]
         meta.doi = normalize_doi(m.get("DOI"))
-        meta.venue = _first(m.get("container-title"))
+        meta.venue = _crossref_venue(m)
         meta.year = _crossref_year(m)
         meta.type = _map_crossref_type(m.get("type", ""), meta.venue)
         meta.citation_count = m.get("is-referenced-by-count")
@@ -720,7 +736,7 @@ def _pmcid(v) -> str | None:
 def _map_crossref_type(t: str, venue: str | None) -> str:
     t = (t or "").lower()
     if t == "proceedings-article":
-        return "workshop paper" if _is_workshop(venue) else "conference paper"
+        return "workshop paper" if is_workshop(venue) else "conference paper"
     return {
         "journal-article": "journal article",
         "posted-content": "preprint",
@@ -735,7 +751,7 @@ def _map_crossref_type(t: str, venue: str | None) -> str:
 def _map_s2_type(types: list[str], venue: str | None) -> str:
     types = [t.lower() for t in (types or [])]
     if "conference" in types:
-        return "workshop paper" if _is_workshop(venue) else "conference paper"
+        return "workshop paper" if is_workshop(venue) else "conference paper"
     if "journalarticle" in types:
         return "journal article"
     if "book" in types:
@@ -745,8 +761,35 @@ def _map_s2_type(types: list[str], venue: str | None) -> str:
     return "other"
 
 
-def _is_workshop(venue: str | None) -> bool:
-    return "workshop" in (venue or "").lower()
+# Crossref types where the publisher's imprint is what a citation names. For a
+# monograph or a chapter "MIT Press" is the right answer; for a journal article
+# or a preprint it is the wrong one, which is what `_crossref_venue` turns on.
+_CROSSREF_BOOKISH = {
+    "book", "monograph", "book-chapter", "book-part", "book-section",
+    "book-series", "book-set", "edited-book", "reference-book",
+}
+
+
+def _crossref_venue(m: dict) -> str | None:
+    """The venue of a Crossref record, or None when it does not carry one.
+
+    `container-title` is the journal or the proceedings volume, and it is the
+    only field that answers this question. `publisher` used to serve as a
+    fallback, which filled the field with things that are not venues: a
+    posted-content DOI reads "arXiv", and a journal article whose container is
+    missing reads "Elsevier BV" or "Springer Science and Business Media LLC".
+
+    That was worse than an empty field in three ways. It reached bibliographies
+    verbatim; it made `synth_bibtex` emit `journal = {Elsevier BV}`; and the
+    ranked venue table matches `^nature\\s`, so a paper whose publisher read
+    "Nature Portfolio" inherited A* without ever naming a venue.
+    """
+    venue = clean_venue(_first(m.get("container-title")))
+    if venue:
+        return venue
+    if (m.get("type") or "").lower() in _CROSSREF_BOOKISH:
+        return clean_venue(m.get("publisher"))
+    return None
 
 
 def _best_title_match(query: str, cands: list[PaperMeta], *,
@@ -759,26 +802,37 @@ def _best_title_match(query: str, cands: list[PaperMeta], *,
     work itself: "Attention Is All You Need" must not match "Channel Attention
     Is All You Need for Video Frames".
     """
-    from ..models import slugify
-
-    q = set(re.findall(r"[a-z0-9]+", query.lower()))
-    if not q:
+    if not re.findall(r"[a-z0-9]+", query.lower()):
         return cands[0] if cands else None
-    target = slugify(query, 200)
     scored: list[tuple[float, int, PaperMeta]] = []
     for c in cands:
         if not c.title:
             continue
-        if slugify(c.title, 200) == target:
-            score = 1.0
-        else:
-            t = set(re.findall(r"[a-z0-9]+", c.title.lower()))
-            if not t:
-                continue
-            score = 2 * len(q & t) / (len(q) + len(t))
+        score = title_similarity(query, c.title)
         if score >= threshold:
             scored.append((score, c.citation_count or 0, c))
     if not scored:
         return None
     scored.sort(key=lambda s: (-s[0], -s[1]))
     return scored[0][2]
+
+
+def title_similarity(a: str | None, b: str | None) -> float:
+    """How closely two titles agree, from 0 to 1 (token F1, slugs as a fast path).
+
+    Public because deciding "are these the same work?" is not only a ranking
+    question: `actions.check` uses it to refuse a DOI whose Crossref record
+    turns out to describe a different paper, which is the one mistake there that
+    would rewrite every other field with another work's metadata.
+    """
+    from ..models import slugify
+
+    if not a or not b:
+        return 0.0
+    if slugify(a, 200) == slugify(b, 200):
+        return 1.0
+    ta = set(re.findall(r"[a-z0-9]+", a.lower()))
+    tb = set(re.findall(r"[a-z0-9]+", b.lower()))
+    if not ta or not tb:
+        return 0.0
+    return 2 * len(ta & tb) / (len(ta) + len(tb))

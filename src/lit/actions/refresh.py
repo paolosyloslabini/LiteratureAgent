@@ -18,6 +18,7 @@ from ..fetch.metadata import resolve_metadata
 from ..models import Entry
 from ..quality import assess
 from ..runner import run_parallel
+from ..venue import is_placeholder
 from .context import Ctx
 
 
@@ -71,8 +72,17 @@ def refresh_entries(ctx: Ctx, keys: list[str] | None = None,
         if meta.doi and not entry.doi:
             res.changes.append(f"DOI found: {meta.doi}")
             entry.doi = meta.doi
-        if meta.venue and not entry.venue:
-            res.changes.append(f"venue: {meta.venue}")
+        # A venue that names a publisher or a preprint server is replaced, not
+        # just filled. Refreshing only an empty venue is why an entry stored as
+        # "arXiv" stayed that way after the paper appeared at a conference: the
+        # field was occupied, so the real venue never got in.
+        if meta.venue and not is_placeholder(meta.venue) and (
+            not entry.venue or is_placeholder(entry.venue)
+        ):
+            res.changes.append(
+                f"venue: {meta.venue}" if not entry.venue
+                else f"venue {entry.venue!r} → {meta.venue!r}"
+            )
             entry.venue = meta.venue
         if meta.bibtex and meta.doi and meta.bibtex != entry.bibtex:
             res.changes.append("bibtex updated")

@@ -45,7 +45,7 @@ NOTES_BANNER = (
 _FM_ORDER = [
     "key", "title", "authors", "year", "venue", "type",
     "doi", "arxiv_id", "url", "code_url", "code_source", "code_reason",
-    "status", "level", "level_reason",
+    "status", "level", "level_reason", "check_note",
     "tags", "citation_count",
     "read_source", "pdf_path", "text_chars", "pages", "pages_read",
     "added", "updated",
@@ -137,7 +137,7 @@ def loads(text: str) -> Entry:
         title=str(data.get("title") or ""),
     )
     for f in ("venue", "doi", "arxiv_id", "url", "code_url", "code_source",
-              "code_reason", "level_reason",
+              "code_reason", "level_reason", "check_note",
               "read_source", "pdf_path", "bibtex", "added", "updated", "status",
               "level", "type"):
         if data.get(f) is not None:
