@@ -155,12 +155,12 @@ RECENT_YEARS = 2
 # preprint badly; Semantic Scholar counts arXiv properly but shares an
 # unauthenticated rate-limit pool with the world. Either can come back empty, so
 # neither is trusted to carry the facet alone.
-SEARCH_FACETS: list[tuple[str, str]] = [
-    ("relevance", "best keyword match (Crossref + Semantic Scholar)"),
-    ("foundational", "most-cited work on the topic"),
-    ("recent", f"published in the last {RECENT_YEARS} years"),
-    ("surveys", "reviews and survey articles"),
-    ("preprints", "arXiv preprints, including work too new to be indexed"),
+SEARCH_FACETS: list[str] = [
+    "relevance",  # best keyword match (Crossref + Semantic Scholar)
+    "foundational",  # most-cited work on the topic
+    "recent",  # published in the last RECENT_YEARS years
+    "surveys",  # reviews and survey articles
+    "preprints",  # arXiv preprints, including work too new to be indexed
 ]
 
 # The indexes a run talks to, for reporting which of them went quiet.
@@ -825,7 +825,7 @@ def _search_candidates(ctx: Ctx, plan: SearchPlan, *,
     Runs concurrently — they are independent HTTP requests to three different
     services, so waiting on them one at a time is pure latency.
     """
-    tasks = [(plan.primary, facet) for facet, _ in SEARCH_FACETS]
+    tasks = [(plan.primary, facet) for facet in SEARCH_FACETS]
     tasks += [(q, "relevance") for q in plan.alternates]
 
     def run(task: tuple[str, str]) -> list[Candidate]:
@@ -1114,8 +1114,10 @@ def mine_references(entries, known_slugs: set[str],
         c = protos[k]
         if c.dedup_key in known_ids or slugify(c.title, 120) in known_slugs:
             continue
+        # `cocitations` is the whole signal here — the ranking card renders it
+        # in words already. Writing the same sentence into `why` would spend
+        # tokens saying it twice *and* take the slot the abstract goes in.
         c.cocitations = n
-        c.why = f"cited by {n} paper(s) already in this library"
         out.append(c)
 
     out.sort(key=lambda c: (-c.cocitations, -(c.year or 0)))

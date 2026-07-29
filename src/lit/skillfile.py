@@ -39,19 +39,20 @@ literature the user already collects. The library is vetted; the open web is not
 ```bash
 lit libs                 # which libraries exist, and which is the default
 lit info                 # scope, entry count, levels, top tags of the current one
-lit info --json          # same, machine-readable
+lit --json info          # same, machine-readable
 ```
 
-Use `-L <name>` on any command to target a specific library. **Every command
-below takes `--json`** — always pass it when you are going to parse the output.
+**`--json` and `-L <name>` go before the subcommand, not after it** —
+`lit --json ls`, `lit -L <name> info`. Every command below takes `--json`;
+always pass it when you are going to parse the output.
 
 ## Reading the library
 
 ```bash
-lit ls --level A --tag benchmarks --json      # filter by level, tag, year, status
-lit show <key> --json                          # one entry, with sections + references
+lit --json ls --level A --tag benchmarks       # filter by level, tag, year, status
+lit --json show <key>                          # one entry, with sections + references
 lit abstract <key> [<key> ...]                 # just the abstract(s), to stdout
-lit search "causal discovery in agents" --json # ranked entries + a short answer
+lit --json search "causal discovery in agents" # ranked entries + a short answer
 ```
 
 Two fields worth knowing about on every entry:
@@ -74,8 +75,8 @@ out **which** papers are relevant.
 ## Answering a question properly
 
 ```bash
-lit ask "What are current agent capabilities in causal discovery?" --json
-lit ask "..." --read 8 --expand 3 --json
+lit --json ask "What are current agent capabilities in causal discovery?"
+lit --json ask "..." --read 8 --expand 3
 ```
 
 `lit ask` opens the actual PDFs and reads them in parallel, then answers with
@@ -95,9 +96,9 @@ lit add "Attention Is All You Need"          # by title
 lit add 10.1145/3292500.3330701              # by DOI
 lit add arxiv:1706.03762                     # by arXiv id
 lit add "Some Paywalled Paper" --pdf ~/Downloads/paper.pdf
-lit find "LLM benchmarks for scientific discovery" -n 10 --json
-lit read <key> --json                        # read a filed paper in full
-lit read --all --level A -n 5 --json         # or work through the backlog
+lit --json find "LLM benchmarks for scientific discovery" -n 10
+lit --json read <key>                        # read a filed paper in full
+lit --json read --all --level A -n 5         # or work through the backlog
 ```
 
 - `add` fetches one paper, reads the **whole text**, and writes the summaries.
@@ -141,9 +142,9 @@ lit read --all --level A -n 5 --json         # or work through the backlog
 ## Finding a paper's code
 
 ```bash
-lit code <key> --json                    # search the web for its repository
-lit code --all --level A -n 10 --json    # the backlog, best papers first
-lit code <key> --dry-run --json          # report without storing
+lit --json code <key>                    # search the web for its repository
+lit --json code --all --level A -n 10    # the backlog, best papers first
+lit --json code <key> --dry-run          # report without storing
 ```
 
 One cheap agent per paper, with web search. It only records a repository whose
@@ -159,8 +160,8 @@ the paper's own — see `code_source` above.
 ## Keeping a library current
 
 ```bash
-lit refresh --json          # re-fetch citation counts, references, venues
-lit refresh <key> --json    # just one entry
+lit --json refresh          # re-fetch citation counts, references, venues
+lit --json refresh <key>    # just one entry
 ```
 
 Network-only and free — no LLM, nothing re-read. Run it before quoting citation
@@ -173,7 +174,7 @@ never touches summaries or notes. To re-read a paper itself, use `lit reread`.
 lit cite vaswani2017attention                    # BibTeX to stdout
 lit cite --level A --format markdown             # a reading list
 lit cite --format bibtex -o refs.bib             # a .bib file for a paper
-lit claim "transformers scale better than LSTMs" --json
+lit --json claim "transformers scale better than LSTMs"
 ```
 
 `lit claim` traces a claim backwards through citations to the paper that

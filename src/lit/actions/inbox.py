@@ -12,7 +12,6 @@ that entry or becomes a new one.
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -117,7 +116,10 @@ def process_inbox(ctx: Ctx, *, keep: bool = False,
 
     if not keep:
         for item in result.items:
-            if item.result and item.result.ok and item.path.exists():
+            # Only files sitting in the inbox are ours to remove: `--add` points
+            # at the user's own copy, wherever they keep it.
+            if (item.result and item.result.ok and item.path.exists()
+                    and item.path.parent == lib.inbox_dir):
                 # The PDF now lives under pdfs/<key>.pdf; clear the inbox copy.
                 try:
                     item.path.unlink()
@@ -195,10 +197,16 @@ def _match_entry(item: InboxItem, unverified: list[Entry], lib) -> Entry | None:
             return hit
 
     if item.title_guess:
+        # Slugged equality only. A containment test matches "Deep Learning"
+        # against a PDF of "Deep Learning for Symbolic Mathematics", and the
+        # caller then reads *this* PDF into *that* entry — one paper's summary
+        # filed under another's title. A near miss costs far less: the PDF
+        # falls through to `add_paper`, which resolves its real metadata and
+        # dedupes on that.
         target = slugify(item.title_guess, 200)
         for e in unverified:
             es = slugify(e.title, 200)
-            if es and (es == target or es in target or target in es):
+            if es and es == target:
                 return e
         hit = lib.find_duplicate(title=item.title_guess)
         if hit:
@@ -210,11 +218,3 @@ def _match_entry(item: InboxItem, unverified: list[Entry], lib) -> Entry | None:
         if stem and stem == slugify(e.key, 60):
             return e
     return None
-
-
-def stash(ctx: Ctx, pdf: Path) -> Path:
-    """Copy a PDF into the inbox for later processing."""
-    ctx.library.inbox_dir.mkdir(parents=True, exist_ok=True)
-    dest = ctx.library.inbox_dir / pdf.name
-    shutil.copy2(pdf, dest)
-    return dest

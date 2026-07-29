@@ -8,8 +8,13 @@ must survive inside it.
 
 from factories import make_entry
 
-from lit.models import Section
-from lit.prompts import _entry_card, library_search_prompt, read_paper_prompt
+from lit.models import Reference, Section
+from lit.prompts import (
+    _entry_card,
+    claim_origin_prompt,
+    library_search_prompt,
+    read_paper_prompt,
+)
 
 
 def _filler(n: int, word: str = "part") -> str:
@@ -22,7 +27,9 @@ def _filler(n: int, word: str = "part") -> str:
 def _saturated():
     """An entry pushing every card field to or past its cap."""
     return make_entry(
-        one_liner=_filler(200, "opener"),
+        # Stored one-liners are stripped on the way in (`add._apply_reading`),
+        # and the card renders on one line.
+        one_liner=_filler(200, "opener").strip(),
         tags=[f"tag-number-{i}" for i in range(10)],
         key_findings=[_filler(160, f"finding-{i}") for i in range(5)],
         sections=[Section(f"Section Number {i}", _filler(400, f"section-{i}"))
@@ -118,3 +125,50 @@ def test_venue_is_not_asked_for_when_it_is_already_known():
     assert "venue_from_text" not in prompt
     assert "header/footer" not in prompt
     assert "NeurIPS" in prompt  # still told what the venue is
+
+
+def test_a_verbose_reading_cannot_inflate_every_later_ranking_prompt():
+    """Findings and the one-liner are stored raw, so the card is where they stop.
+
+    Section summaries are clipped when the reading is saved; these two are not,
+    which means one long-winded read goes on being paid for in every search and
+    every `ask` selection until the entry is re-read.
+    """
+    e = make_entry(one_liner=_filler(4_000, "opener"),
+                   key_findings=[_filler(4_000, f"finding-{i}") for i in range(5)],
+                   sections=[], notes="")
+    assert len(_entry_card(e)) < 2_000
+    assert len(_entry_card(e, brief=True)) < 1_200
+
+
+# --------------------------------------------------------------------------
+# Claim tracing — the reference list is quoted at every hop
+# --------------------------------------------------------------------------
+
+def _refs(n: int) -> list[Reference]:
+    return [Reference(title=f"Cited Work Number {i}", year=1990 + i % 30,
+                      doi=f"10.1/ref{i}") for i in range(n)]
+
+
+def test_claim_prompt_caps_a_survey_sized_reference_list():
+    """A survey's bibliography is bought at every hop and read at most 3 deep."""
+    prompt = claim_origin_prompt(claim="attention beats recurrence",
+                                 entry=make_entry(), references=_refs(300),
+                                 truncated=False)
+    assert len(prompt) < 10_000
+    assert "Cited Work Number 299" not in prompt
+
+
+def test_claim_prompt_indices_still_address_the_caller_s_list():
+    """The model answers with an index; `claim._candidate_refs` looks it up.
+
+    The cap is a prefix slice, so every index the model can see names the same
+    reference in the full list the caller holds — and no index it can see is
+    out of range for that list.
+    """
+    refs = _refs(300)
+    prompt = claim_origin_prompt(claim="a claim", entry=make_entry(),
+                                 references=refs, truncated=False)
+    for i in (0, 1, 79):
+        assert f"  [{i}] {refs[i].title}" in prompt
+    assert "  [80] " not in prompt

@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import entryfile
 from .library import LIBRARY_TOML, Library, LibraryError, normalize_name
-from .models import Entry
+from .models import Entry, slugify
 
 BUNDLE_SUFFIX = ".litlib"
 MANIFEST = "manifest.json"
@@ -184,8 +184,10 @@ def import_bundle(
                 incoming = entryfile.loads(z.read(name_in_zip).decode("utf-8"))
             except Exception:
                 continue
-            if not incoming.key:
-                incoming.key = Path(name_in_zip).stem
+            # A key becomes a filename, and this one is theirs, not ours: a
+            # key like `../../pwned` would write outside the library entirely.
+            if not incoming.key or _escapes_library(incoming.key):
+                incoming.key = slugify(incoming.key) or Path(name_in_zip).stem
 
             outcome, key = _merge_entry(lib, incoming, strategy, manifest, result)
             if outcome == "added":
@@ -203,6 +205,11 @@ def import_bundle(
                     result.pdfs += 1
 
     return result
+
+
+def _escapes_library(key: str) -> bool:
+    """True if using `key` as a filename could reach outside the library."""
+    return "/" in key or "\\" in key or ".." in key
 
 
 def _merge_entry(lib: Library, incoming: Entry, strategy: str,

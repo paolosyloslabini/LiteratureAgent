@@ -196,8 +196,3 @@ def chain_tree(chain: list, claim: str) -> Panel:
         lines.append("")
     return Panel(Markdown("\n".join(lines)), title="Citation chain",
                  border_style="cyan")
-
-
-def _short(s: str, n: int) -> str:
-    s = s or ""
-    return s if len(s) <= n else s[: n - 1] + "…"
