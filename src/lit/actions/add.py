@@ -189,8 +189,12 @@ def add_paper(
     # expensive thing here — the same PDF, the same agent, the same answer, paid
     # for again because the entry lives in a different directory. If a sibling
     # library under the same root has already read this one, take its reading.
-    # `--refresh` still buys a fresh one.
-    if not refresh:
+    # `--refresh` still buys a fresh one — but only where there is a reading here
+    # to replace: the first read of an entry filed unread arrives with
+    # `refresh=True` (from `reread`) and has nothing of its own to refresh. A
+    # caller holding a PDF asked for *that* file to be read, and always gets it.
+    first_read = existing is not None and not existing.is_verified and local_pdf is None
+    if not refresh or first_read:
         found = _reading_elsewhere(ctx, meta)
         if found is not None:
             source_lib, done = found

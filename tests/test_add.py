@@ -580,6 +580,71 @@ def test_an_unread_entry_elsewhere_is_not_reused(monkeypatch, ctx, cfg):
     assert res.entry.status == STATUS_VERIFIED
 
 
+def test_a_first_read_takes_the_reading_a_sibling_library_already_has(
+        monkeypatch, ctx, cfg):
+    """`lit read <key>` on an unread entry: the free copy, not a fresh agent."""
+    from lit.actions.add import read_entries
+
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    first = add_paper(ctx, "t")            # read once, into `testlib`
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    filed = add_paper(moved, "t", read=False)
+    assert filed.entry.status == STATUS_UNREAD
+
+    [res] = read_entries(moved, [filed.entry])
+
+    assert llm2.calls == 0                 # the reader was not bought twice
+    assert res.ok
+    assert res.entry.key == filed.entry.key
+    assert res.entry.status == STATUS_VERIFIED
+    assert res.entry.one_liner == first.entry.one_liner
+    assert "reused" in res.message and "testlib" in res.message
+    assert len(other) == 1
+
+
+def test_a_reread_of_an_entry_already_read_still_buys_a_fresh_one(
+        monkeypatch, ctx, cfg):
+    """`lit reread` on an entry that has a reading means: read it again."""
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    adopted = add_paper(moved, "t")
+    assert llm2.calls == 0 and adopted.entry.status == STATUS_VERIFIED
+
+    res = reread(moved, adopted.entry.key)
+
+    assert llm2.calls == 1
+    assert res.ok and res.entry.status == STATUS_VERIFIED
+
+
+def test_a_supplied_pdf_is_read_instead_of_taking_a_copy(
+        monkeypatch, ctx, cfg, tmp_path):
+    """`--pdf` and `lit inbox` point at a file and mean: read *that*."""
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    filed = add_paper(moved, "t", read=False)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    res = reread(moved, filed.entry.key, local_pdf=pdf)
+
+    assert llm2.calls == 1
+    assert res.ok and res.entry.status == STATUS_VERIFIED
+
+
 def test_a_different_paper_elsewhere_is_not_mistaken_for_this_one(monkeypatch, ctx, cfg):
     other = _second_library(cfg)
     wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
