@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from lit.config import DEFAULT_ROLE_MODELS, LLMConfig
+from lit.config import DEFAULT_ROLE_EFFORT, DEFAULT_ROLE_MODELS, LLMConfig
 from lit.llm import ClaudeCLI, LLMError, extract_json
 
 
@@ -234,3 +234,92 @@ def test_sealed_calls_get_turn_headroom(monkeypatch):
     turns = int(cap["cmd"][cap["cmd"].index("--max-turns") + 1])
     assert turns >= 2
     assert "--disallowed-tools" in cap["cmd"]  # still no tool is reachable
+
+
+# --------------------------------------------------------------------------
+# Per-role reasoning effort
+#
+# The CLI inherits `effortLevel` from the user's own settings.json when no
+# --effort is given. That is a setting chosen for interactive work, and it was
+# quietly paying for it on every paper read, so `lit` now always states one.
+# --------------------------------------------------------------------------
+
+def test_roles_have_distinct_effort_defaults():
+    cfg = LLMConfig()
+    assert cfg.effort_for("scout") == "low"
+    assert cfg.effort_for("rank") == "low"
+    assert cfg.effort_for("reader") == "medium"
+    assert cfg.effort_for("analyst") == "medium"
+
+
+def test_unknown_role_falls_back_to_the_default_effort():
+    assert LLMConfig(effort="high").effort_for("nonexistent") == "high"
+    assert LLMConfig(effort="high").effort_for(None) == "high"
+
+
+def test_effort_override_wins_over_every_role():
+    cfg = LLMConfig(override_effort="max")
+    assert all(cfg.effort_for(r) == "max" for r in DEFAULT_ROLE_EFFORT)
+
+
+def test_run_states_the_role_effort(monkeypatch):
+    cap = {}
+    _patch_run(monkeypatch, {"result": "ok"}, cap)
+    ClaudeCLI(LLMConfig()).run("hi", role="reader")
+    assert cap["cmd"][cap["cmd"].index("--effort") + 1] == "medium"
+
+
+def test_an_empty_effort_leaves_the_flag_off(monkeypatch):
+    """Opting out puts the CLI's own setting back in charge."""
+    cap = {}
+    _patch_run(monkeypatch, {"result": "ok"}, cap)
+    ClaudeCLI(LLMConfig(effort="", efforts={})).run("hi", role="reader")
+    assert "--effort" not in cap["cmd"]
+
+
+def test_a_cli_without_the_effort_flag_still_works(monkeypatch):
+    """An older Claude Code must lose the tuning, not every call."""
+    calls = {"n": 0, "cmds": []}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        calls["cmds"].append(cmd)
+        if "--effort" in cmd:
+            return FakeProc("error: unknown option '--effort'", returncode=1)
+        return FakeProc({"result": "ok"})
+
+    monkeypatch.setattr("lit.llm.subprocess.run", fake_run)
+    monkeypatch.setattr("lit.llm.shutil.which", lambda _: "/usr/bin/claude")
+
+    llm = ClaudeCLI(LLMConfig())
+    assert llm.run("hi", role="reader").text == "ok"
+    assert calls["n"] == 2                       # rejected, then retried without it
+    assert "--effort" not in calls["cmds"][1]
+
+    llm.run("again", role="reader")              # and it is not tried again
+    assert "--effort" not in calls["cmds"][2]
+
+
+def test_an_unrelated_failure_is_not_blamed_on_effort(monkeypatch):
+    cap = {}
+    _patch_run(monkeypatch, "network is unreachable", cap, returncode=1)
+    with pytest.raises(LLMError, match="exited 1"):
+        ClaudeCLI(LLMConfig(max_retries=0)).run("go", role="reader")
+
+
+def test_repairing_a_reply_does_not_pay_for_reasoning(monkeypatch):
+    """Restating an answer as valid JSON is not a thinking task."""
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        if len(seen) == 1:
+            return FakeProc({"result": "here you go: not json at all"})
+        return FakeProc({"result": '{"one_liner": "ok"}'})
+
+    monkeypatch.setattr("lit.llm.subprocess.run", fake_run)
+    monkeypatch.setattr("lit.llm.shutil.which", lambda _: "/usr/bin/claude")
+
+    ClaudeCLI(LLMConfig()).json("read this", role="reader")
+    assert seen[0][seen[0].index("--effort") + 1] == "medium"
+    assert seen[1][seen[1].index("--effort") + 1] == "low"

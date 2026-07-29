@@ -54,6 +54,23 @@ PLANNER_SYSTEM = (
 # actually does; short enough that a 40-candidate pool stays a cheap call.
 ABSTRACT_SNIPPET = 260
 
+# What a reading is allowed to come back as. An entry is a card that tells you
+# whether to open the paper — the paper itself is a fetch away, and `lit ask`
+# re-reads it in full when a question needs more. Left unbounded the reader
+# wrote one entry per subsection and appendix, which cost output tokens on the
+# way in and then rode along in every prompt that quotes a stored summary.
+#
+# The counts are enforced in `actions.add`. The word limit is asked for but
+# enforced only at `SECTION_WORDS_CEILING`, because clipping is the wrong tool
+# for a summary that merely ran long: the tokens are already paid for by the
+# time it arrives, and cutting a good section mid-sentence to save stored bytes
+# loses more than it gains. The ceiling is there for a reply that ignores the
+# brief entirely.
+MAX_SECTIONS = 8
+MAX_SECTION_WORDS = 60
+SECTION_WORDS_CEILING = 120
+MAX_KEY_FINDINGS = 6
+
 
 # --------------------------------------------------------------------------
 # Reading a paper -> entry fields
@@ -75,9 +92,10 @@ def read_paper_prompt(
         "sections": [
             {
                 "name": "string — the section heading as it appears in the paper",
-                "summary": "string — 2-5 sentences on what THIS section actually "
-                           "says: the specific methods, numbers, and findings, not "
-                           "a description of what the section is about",
+                "summary": f"string — 1-3 sentences, at most {MAX_SECTION_WORDS} "
+                           "words, on what THIS section actually says: the "
+                           "specific methods, numbers, and findings, not a "
+                           "description of what the section is about",
             }
         ],
         "key_findings": [
@@ -106,12 +124,19 @@ def read_paper_prompt(
         "Read all of it, then produce a structured record of it.",
         "",
         "Requirements:",
-        "- Cover the document section by section, in the order the sections "
-        "appear. Use the paper's own section names.",
+        f"- Cover the document section by section, in the order the sections "
+        f"appear, in at most {MAX_SECTIONS} entries. Use the paper's own section "
+        "names, and only its top-level ones: fold each subsection into its "
+        "parent rather than giving it an entry of its own.",
         "- The detailed summary must be substantially shorter than the paper but "
         "must preserve its actual content: what was done, on what data, with what "
-        "result. Include concrete numbers where the paper reports them.",
-        "- Do not include the reference list as a section.",
+        "result. Include concrete numbers where the paper reports them. Prefer "
+        "the number to the sentence describing it; drop anything a reader "
+        "deciding whether to open this paper would not need.",
+        f"- At most {MAX_KEY_FINDINGS} key findings — the load-bearing ones, not "
+        "every result the paper reports.",
+        "- Do not include the reference list as a section, and do not give the "
+        "appendices or supplementary material entries of their own.",
         "- Write nothing you cannot point to in the text.",
         "- For code_url, look wherever authors put release links: the abstract, "
         "a footnote on the first page, the end of the introduction, and any "

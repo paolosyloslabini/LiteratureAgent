@@ -80,6 +80,10 @@ class ClaudeCLI:
         self.usage = usage or Usage()
         self.verbose = verbose
         self._exe = shutil.which("claude")
+        # Set once the installed CLI turns out not to know `--effort`, so an
+        # older Claude Code degrades to its own default instead of failing every
+        # call. Checked by asking, not by parsing a version number.
+        self._no_effort_flag = False
 
     @property
     def available(self) -> bool:
@@ -105,6 +109,7 @@ class ClaudeCLI:
         model: str | None = None,
         role: str | None = None,
         timeout_s: int | None = None,
+        effort: str | None = None,
     ) -> LLMResult:
         # Two turns even for sealed text calls: the model occasionally emits a
         # tool_use block anyway, and with a ceiling of 1 that ends the session
@@ -112,6 +117,7 @@ class ClaudeCLI:
         # and answers in text on the next turn. No tool is reachable either way.
         self.require()
         chosen = model or self.cfg.model_for(role)
+        level = effort if effort is not None else self.cfg.effort_for(role)
         cmd = [
             self._exe, "-p", prompt,
             "--output-format", "json",
@@ -119,6 +125,12 @@ class ClaudeCLI:
             "--max-turns", str(max_turns),
             "--strict-mcp-config",
         ]
+        # Stated, not inherited: without this the call picks up whatever
+        # `effortLevel` the user set for their own interactive sessions, which
+        # on a batch of paper reads costs several times the output tokens the
+        # work needs. See DEFAULT_ROLE_EFFORT.
+        if level and not self._no_effort_flag:
+            cmd += ["--effort", level]
         if tools:
             cmd += ["--allowed-tools", " ".join(tools)]
         else:
@@ -149,6 +161,15 @@ class ClaudeCLI:
 
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()[:600]
+            # An older CLI has no --effort. Drop it for the rest of this run and
+            # retry once, rather than failing every call over a tuning flag.
+            if level and not self._no_effort_flag and _rejected_effort(detail):
+                self._no_effort_flag = True
+                return self.run(
+                    prompt, stdin_text=stdin_text, system=system, tools=tools,
+                    max_turns=max_turns, model=model, role=role,
+                    timeout_s=timeout_s, effort=effort,
+                )
             raise LLMError(f"claude exited {proc.returncode}: {detail}")
 
         try:
@@ -188,6 +209,7 @@ class ClaudeCLI:
         model: str | None = None,
         role: str | None = None,
         timeout_s: int | None = None,
+        effort: str | None = None,
     ) -> dict:
         """Run a call that must produce a JSON object, retrying on bad output.
 
@@ -205,6 +227,7 @@ class ClaudeCLI:
         """
         attempt_prompt, attempt_stdin = prompt, stdin_text
         attempt_tools, repairing = tools, False
+        attempt_effort = effort
         last_err = ""
 
         for attempt in range(self.cfg.max_retries + 1):
@@ -218,6 +241,7 @@ class ClaudeCLI:
                     model=model,
                     role=role,
                     timeout_s=timeout_s,
+                    effort=attempt_effort,
                 )
             except LLMError as exc:
                 last_err = str(exc)
@@ -226,6 +250,7 @@ class ClaudeCLI:
                 # Nothing came back to repair, so redo the whole call.
                 attempt_prompt, attempt_stdin = prompt, stdin_text
                 attempt_tools, repairing = tools, False
+                attempt_effort = effort
                 continue
 
             try:
@@ -241,10 +266,12 @@ class ClaudeCLI:
             if not repairing and res.text.strip():
                 # Repair the reply we have. Sealed, because reformatting text
                 # the model already wrote needs no tools even when the original
-                # call was an agentic one.
+                # call was an agentic one — and `low`, because restating an
+                # answer as valid JSON is not a reasoning task.
                 attempt_prompt = _repair_prompt(last_err, required)
                 attempt_stdin = "=== REPLY TO REPAIR ===\n" + res.text
                 attempt_tools, repairing = None, True
+                attempt_effort = "low"
             else:
                 attempt_prompt = (
                     f"{prompt}\n\n"
@@ -253,9 +280,24 @@ class ClaudeCLI:
                     "fences, no explanation before or after."
                 )
                 attempt_stdin, attempt_tools, repairing = stdin_text, tools, False
+                attempt_effort = effort
 
         raise LLMError(f"claude did not return usable JSON after "
                        f"{self.cfg.max_retries + 1} attempts: {last_err}")
+
+
+def _rejected_effort(stderr: str) -> bool:
+    """Did the CLI fail because it does not know `--effort`?
+
+    Matched on the message rather than on a version check, so a CLI that adds,
+    renames or removes the flag is handled the same way: state the level, and
+    fall back to the CLI's own default if it will not take one.
+    """
+    low = (stderr or "").lower()
+    return "effort" in low and (
+        "unknown option" in low or "unknown argument" in low
+        or "unrecognized" in low or "invalid option" in low
+    )
 
 
 # --------------------------------------------------------------------------
