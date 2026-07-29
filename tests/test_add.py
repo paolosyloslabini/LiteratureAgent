@@ -11,9 +11,10 @@ import pytest
 from factories import make_meta
 from rich.console import Console
 
-from lit.actions.add import add_paper, reread
+from lit.actions.add import AddResult, add_paper, reread
 from lit.prompts import MAX_KEY_FINDINGS, MAX_SECTIONS, SECTION_WORDS_CEILING
 from lit.actions.context import Ctx, parse_target
+from lit.actions.inbox import process_inbox
 from lit.fetch.fulltext import FullText
 from lit.llm import LLMError
 from lit.models import (
@@ -592,3 +593,43 @@ def test_a_different_paper_elsewhere_is_not_mistaken_for_this_one(monkeypatch, c
                 fulltext=FullText("t" * 9000, "arxiv"))
     add_paper(moved, "other")
     assert llm2.calls == 1
+
+
+# --------------------------------------------------------------------------
+# The inbox clears its own copies — and only its own
+# --------------------------------------------------------------------------
+
+def wire_inbox(monkeypatch):
+    """Identification and the add itself are not what these tests are about."""
+    monkeypatch.setattr("lit.actions.inbox.pdf_to_text", lambda *a, **k:
+                        "arXiv:1706.03762v5 [cs.CL]\n\nAttention Is All You Need\n")
+    monkeypatch.setattr("lit.actions.inbox.add_paper", lambda *a, **k:
+                        AddResult(status="added", message="vaswani2017attention"))
+
+
+def drop_pdf(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"%PDF-1.4\n")
+    return path
+
+
+def test_a_processed_pdf_leaves_the_inbox(monkeypatch, ctx):
+    wire_inbox(monkeypatch)
+    dropped = drop_pdf(ctx.library.inbox_dir / "paper.pdf")
+
+    res = process_inbox(ctx)
+
+    assert res.items[0].result.ok
+    assert not dropped.exists()
+
+
+def test_a_file_outside_the_inbox_is_left_where_it_is(monkeypatch, ctx, tmp_path):
+    """`lit inbox --add ~/Downloads/paper.pdf` reads your copy, it does not
+    consume it: the file is yours, and the inbox never held it."""
+    wire_inbox(monkeypatch)
+    mine = drop_pdf(tmp_path / "Downloads" / "paper.pdf")
+
+    res = process_inbox(ctx, only=[mine])
+
+    assert res.items[0].result.ok
+    assert mine.exists()
