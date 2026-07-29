@@ -23,6 +23,7 @@ from ..fetch.metadata import PaperMeta, resolve_metadata, synth_bibtex
 from ..llm import LLMError
 from ..models import (
     ENTRY_TYPES,
+    STATUS_UNREAD,
     STATUS_UNVERIFIED,
     STATUS_VERIFIED,
     Entry,
@@ -33,9 +34,11 @@ from ..models import (
 )
 from ..prompts import READER_SYSTEM, read_paper_prompt
 from ..quality import LevelVerdict, assess, passes_quality_bar
+from ..runner import run_parallel
 from .context import Ctx, Target, parse_target
 
-# How much paper text we hand the model in one call.
+# Default ceiling on how much paper text we hand the model in one call. The
+# live value comes from `llm.read_chars`; this is the fallback.
 MAX_PROMPT_CHARS = 400_000
 
 
@@ -74,8 +77,17 @@ def add_paper(
     extra_tags: list[str] | None = None,
     meta: PaperMeta | None = None,
     target: Target | None = None,
+    read: bool = True,
+    max_chars: int | None = None,
 ) -> AddResult:
-    """Resolve, vet, read and store one paper."""
+    """Resolve, vet, read and store one paper.
+
+    With `read=False` the paper is filed from its metadata alone — bibliographic
+    record, publisher abstract, references, level from metrics — and marked
+    `unread`. No full text is fetched and no reader agent runs, so the whole
+    thing costs nothing but a few API calls. `lit read <key>` fills in the
+    summaries later, for the entries that turn out to be worth it.
+    """
     lib = ctx.library
     warnings: list[str] = []
     target = target or parse_target(query)
@@ -132,6 +144,25 @@ def add_paper(
     key = existing.key if existing else lib.unique_key(
         make_key(meta.authors, meta.year, meta.title)
     )
+
+    if not read:
+        entry = _base_entry(key, meta, verdict, extra_tags)
+        entry.status = STATUS_UNREAD
+        if existing:
+            entry.added = existing.added
+            # A metadata-only pass must never cost a summary that was already
+            # paid for: refreshing an entry that has been read keeps its
+            # reading, and only its bibliographic fields are updated.
+            _carry_reading(entry, existing)
+        saved = lib.save_entry(entry)
+        note = ("refreshed" if entry.is_verified
+                else f"unread — `lit read {key}` to summarize it")
+        return AddResult(
+            "updated" if existing else "added",
+            f"[{key}] {entry.title} ({note})",
+            entry=saved, verdict=verdict, meta=meta, warnings=warnings,
+        )
+
     ctx.vlog(f"[{key}] fetching full text")
     ft = fetch_fulltext(
         ctx.http, meta,
@@ -162,7 +193,8 @@ def add_paper(
         )
 
     # ---- 5. read it ------------------------------------------------------
-    text, truncated = truncate_for_llm(ft.text, MAX_PROMPT_CHARS)
+    budget = max_chars or getattr(ctx.cfg.llm, "read_chars", MAX_PROMPT_CHARS)
+    text, truncated = truncate_for_llm(ft.text, budget, drop_references=True)
     if truncated:
         warnings.append(
             f"document is {ft.chars:,} chars; the middle was omitted to fit context"
@@ -262,6 +294,29 @@ def _base_entry(key: str, meta: PaperMeta, verdict: LevelVerdict,
         bibtex=meta.bibtex,
         tags=_norm_tags(extra_tags or []),
     )
+
+
+def _carry_reading(entry: Entry, existing: Entry) -> None:
+    """Move an earlier read's output onto a freshly built entry.
+
+    Used on the metadata-only path, where the new entry has correct
+    bibliographic fields but no summaries at all.
+    """
+    if not existing.is_verified:
+        return
+    entry.status = existing.status
+    entry.one_liner = existing.one_liner
+    entry.sections = list(existing.sections)
+    entry.key_findings = list(existing.key_findings)
+    entry.tags = _norm_tags(list(existing.tags) + list(entry.tags))
+    entry.code_url = existing.code_url or entry.code_url
+    entry.read_source = existing.read_source
+    entry.pdf_path = existing.pdf_path
+    entry.text_chars = existing.text_chars
+    entry.pages = existing.pages
+    entry.pages_read = existing.pages_read
+    if existing.venue and not entry.venue:
+        entry.venue = existing.venue
 
 
 def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
@@ -387,6 +442,42 @@ def reread(ctx: Ctx, key: str, *, local_pdf: Path | None = None) -> AddResult:
         force=True,
         target=Target(doi=entry.doi, arxiv_id=entry.arxiv_id, title=entry.title),
     )
+
+
+def read_entries(ctx: Ctx, entries: list[Entry]) -> list[AddResult]:
+    """Fetch and read a batch of entries concurrently, one agent per paper.
+
+    This is the other half of the deal `find` makes: papers are filed cheaply
+    from their metadata, and the expensive read is spent later, deliberately,
+    on the ones that turned out to matter.
+    """
+    if not entries:
+        return []
+
+    ctx.log(f"[bold]Reading[/bold] {len(entries)} papers "
+            f"({ctx.workers} at a time)…")
+
+    def work(e: Entry) -> AddResult:
+        return reread(ctx, e.key)
+
+    def report(r) -> None:
+        entry: Entry = r.item
+        if not r.ok:
+            ctx.log(f"  [red]![/red] [{entry.key}] {r.error}")
+            return
+        res: AddResult = r.value
+        icon = "[green]+[/green]" if res.ok else "[yellow]-[/yellow]"
+        ctx.log(f"  {icon} {res.message}")
+
+    runs = run_parallel(entries, work, workers=ctx.workers, on_done=report)
+    out: list[AddResult] = []
+    for r in runs:
+        if r.ok and r.value is not None:
+            out.append(r.value)
+        elif r.error is not None:
+            entry: Entry = r.item  # type: ignore[assignment]
+            out.append(AddResult("error", f"[{entry.key}] {r.error}"))
+    return out
 
 
 def make_reference(meta: PaperMeta) -> Reference:

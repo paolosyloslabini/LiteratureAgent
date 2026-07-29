@@ -15,7 +15,7 @@ from lit.actions.add import add_paper
 from lit.actions.context import Ctx, parse_target
 from lit.fetch.fulltext import FullText
 from lit.llm import LLMError
-from lit.models import STATUS_UNVERIFIED, STATUS_VERIFIED
+from lit.models import STATUS_UNREAD, STATUS_UNVERIFIED, STATUS_VERIFIED
 
 READING = {
     "one_liner": "Introduces the Transformer.",
@@ -134,6 +134,86 @@ def test_metadata_is_still_recorded_when_unverified(monkeypatch, ctx):
     assert res.entry.year == 2017
     assert res.entry.venue == "NeurIPS"
     assert res.entry.arxiv_id == "1706.03762"
+
+
+# --------------------------------------------------------------------------
+# Filing without reading — the cheap path `find` takes by default
+# --------------------------------------------------------------------------
+
+def test_read_false_files_metadata_and_never_fetches_or_reads(monkeypatch, ctx):
+    llm = wire(monkeypatch, ctx, meta=make_meta(abstract="We propose a new model."),
+               fulltext=FullText("x" * 9000, "arxiv"))
+    def no_fetch(*a, **k):
+        raise AssertionError("the full text was fetched on the unread path")
+    monkeypatch.setattr("lit.actions.add.fetch_fulltext", no_fetch)
+
+    res = add_paper(ctx, "Attention Is All You Need", read=False)
+
+    assert res.status == "added"
+    assert res.entry.status == STATUS_UNREAD
+    assert res.entry.is_unread and res.entry.needs_read
+    assert llm.calls == 0
+    # Bibliographic record and the publisher's abstract are all there.
+    assert res.entry.year == 2017 and res.entry.venue == "NeurIPS"
+    assert res.entry.abstract == "We propose a new model."
+    # But nothing a reader would have written.
+    assert res.entry.one_liner is None and res.entry.sections == []
+
+
+def test_the_unread_message_says_how_to_read_it(monkeypatch, ctx):
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=None)
+    res = add_paper(ctx, "x", read=False)
+    assert "lit read vaswani2017attention" in res.message
+
+
+def test_a_metadata_refresh_does_not_discard_a_summary_already_paid_for(
+        monkeypatch, ctx):
+    """`read=False` over an entry that was read keeps its reading."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
+    first = add_paper(ctx, "Attention Is All You Need")
+    assert first.entry.status == STATUS_VERIFIED
+
+    again = add_paper(ctx, "Attention Is All You Need", read=False, refresh=True)
+    assert again.entry.status == STATUS_VERIFIED
+    assert again.entry.one_liner == "Introduces the Transformer."
+    assert again.entry.sections[0].name == "Introduction"
+
+
+def test_reading_an_unread_entry_later_fills_it_in(monkeypatch, ctx):
+    from lit.actions.add import read_entries
+
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
+    filed = add_paper(ctx, "Attention Is All You Need", read=False)
+    assert filed.entry.needs_read
+
+    [res] = read_entries(ctx, [filed.entry])
+    assert res.ok
+    assert res.entry.status == STATUS_VERIFIED
+    assert res.entry.one_liner == "Introduces the Transformer."
+
+
+def test_the_reference_list_is_not_sent_to_the_reader(monkeypatch, ctx):
+    body = "Method and results. " * 500
+    text = f"Abstract\n\n{body}\n\nReferences\n\n" + "[1] Someone. Paper. 2020.\n" * 200
+    llm = wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"))
+    add_paper(ctx, "x")
+
+    sent = llm.seen_text[0]
+    assert "Method and results." in sent
+    assert "Someone. Paper. 2020." not in sent
+
+
+def test_find_reads_on_a_tighter_budget_than_add(monkeypatch, ctx):
+    huge = "WORD " * 60_000  # 300k chars: over find's budget, under add's
+    llm = wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(huge, "arxiv"))
+
+    add_paper(ctx, "x")
+    generous = len(llm.seen_text[-1])
+    add_paper(ctx, "x", refresh=True, max_chars=ctx.cfg.llm.find_read_chars)
+    tight = len(llm.seen_text[-1])
+
+    assert tight < generous
+    assert tight <= ctx.cfg.llm.find_read_chars + 200
 
 
 # --------------------------------------------------------------------------

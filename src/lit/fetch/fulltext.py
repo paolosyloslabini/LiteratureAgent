@@ -421,12 +421,59 @@ def _read_cache(path: Path) -> FullText | None:
     return FullText(text=raw, source="cache", pages=pages, pages_read=pages_read)
 
 
-def truncate_for_llm(text: str, max_chars: int = 400_000) -> tuple[str, bool]:
+# Headings that begin a paper's own bibliography. Matched on a line of its own,
+# optionally numbered, so a sentence mentioning "references" is not a hit.
+_REF_HEADING = re.compile(
+    r"^\s*(?:\d+\.?\s*|[IVXL]+\.?\s*)?"
+    r"(references?|bibliography|works\s+cited|literature\s+cited)"
+    r"\s*:?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# A cut is only made when this much of the document still survives it. That is
+# the whole safety story: a stray "References" line in a table of contents sits
+# near the front, so cutting there would leave almost nothing and is refused,
+# while a real bibliography leaves the paper intact behind it.
+_REF_MIN_KEPT = 0.3
+
+
+def strip_reference_list(text: str) -> tuple[str, int]:
+    """Drop the paper's own bibliography. Returns the text and chars removed.
+
+    A reference list is routinely a fifth of an extracted paper and is pure
+    weight in a reading prompt: the reader is explicitly told not to summarize
+    it, and every command that needs the citations gets them as structured data
+    from the metadata APIs instead. Cutting it before the text is sent is the
+    single cheapest saving available on a read.
+    """
+    if not text:
+        return text, 0
+    floor = len(text) * _REF_MIN_KEPT
+    # The last qualifying heading, not the first: an appendix can follow the
+    # bibliography, and a book repeats the heading once per chapter. Taking the
+    # last one errs toward cutting less.
+    cut = None
+    for m in _REF_HEADING.finditer(text):
+        if m.start() >= floor:
+            cut = m.start()
+    if cut is None:
+        return text, 0
+    kept = text[:cut].rstrip()
+    return kept + "\n\n[... reference list omitted ...]", len(text) - len(kept)
+
+
+def truncate_for_llm(text: str, max_chars: int = 400_000, *,
+                     drop_references: bool = False) -> tuple[str, bool]:
     """Fit a paper into a prompt, keeping the head and tail if it is huge.
 
-    The head carries abstract/intro/method; the tail carries results, discussion
-    and the reference list. The middle is where a long appendix usually sits.
+    The head carries abstract/intro/method; the tail carries results and
+    discussion. The middle is where a long appendix usually sits.
+
+    `drop_references` removes the paper's own bibliography first, so the budget
+    is spent on the parts a reader is actually asked about. It is off by default
+    because claim tracing reads citation context and wants it left in place.
     """
+    if drop_references:
+        text, _ = strip_reference_list(text)
     if len(text) <= max_chars:
         return text, False
     head = int(max_chars * 0.7)

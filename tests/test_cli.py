@@ -8,6 +8,7 @@ import pytest
 from factories import make_entry
 from typer.testing import CliRunner
 
+from lit.actions.discover import Candidate, FindResult
 from lit.cli import app, state
 from lit.library import Library
 
@@ -26,7 +27,7 @@ def isolated(tmp_path, monkeypatch):
     state.library_name = None
     state.json_mode = False
     state.model = None
-    state.parallel = None
+    state.workers = None
     yield root
     state._cfg = None
 
@@ -396,3 +397,95 @@ def test_reread_json_reports_usage(stocked):
 
 def test_inbox_json_reports_usage(stocked):
     assert js(run("--json", "inbox"))["usage"] == ""
+
+
+# --------------------------------------------------------------------------
+# `find` files papers unread by default; `read` is the opt-in expensive step
+# --------------------------------------------------------------------------
+
+def test_find_does_not_read_unless_asked(stocked, monkeypatch):
+    """The default `find` must not spawn a single reader agent."""
+    seen = {}
+
+    def fake_discover(ctx, query, **kw):
+        seen.update(kw)
+        return FindResult(candidates=[Candidate(title="A Candidate Paper")])
+
+    def fake_add(ctx, candidates, **kw):
+        seen["read"] = kw.get("read")
+        return []
+
+    monkeypatch.setattr("lit.cli.discover", fake_discover)
+    monkeypatch.setattr("lit.cli.add_candidates", fake_add)
+
+    r = run("--json", "-y", "find", "a topic")
+    assert r.exit_code == 0
+    assert seen["read"] is False        # no reader agents
+    assert seen["use_scouts"] is False  # no scout agents either
+    assert js(r)["unread"] is True
+
+
+def test_find_parallel_turns_the_scouts_on(stocked, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("lit.cli.discover",
+                        lambda ctx, q, **kw: (seen.update(kw), FindResult())[1])
+    r = run("--json", "-y", "find", "a topic", "--parallel")
+    assert r.exit_code == 0
+    assert seen["use_scouts"] is True
+
+
+def test_find_read_opts_into_the_reader_agents(stocked, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("lit.cli.discover",
+                        lambda ctx, q, **kw: FindResult(
+                            candidates=[Candidate(title="A Candidate Paper")]))
+    monkeypatch.setattr("lit.cli.add_candidates",
+                        lambda ctx, c, **kw: (seen.update(kw), [])[1])
+    r = run("--json", "-y", "find", "a topic", "--read")
+    assert r.exit_code == 0
+    assert seen["read"] is True
+
+
+def test_read_needs_a_target(stocked):
+    r = run("--json", "read")
+    assert r.exit_code == 1
+    assert "entry keys" in js(r)["error"]
+
+
+def test_read_rejects_an_unknown_key(stocked):
+    r = run("--json", "read", "nosuchkey")
+    assert r.exit_code == 1
+    assert "nosuchkey" in js(r)["error"]
+
+
+def test_read_all_picks_up_entries_with_no_summary(stocked, monkeypatch):
+    stocked.save_entry(make_entry(
+        key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
+        one_liner=None, sections=[], status="unread",
+    ))
+    asked = {}
+    monkeypatch.setattr("lit.cli.read_entries",
+                        lambda ctx, entries: (asked.update(
+                            keys=[e.key for e in entries]), [])[1])
+    r = run("--json", "read", "--all")
+    assert r.exit_code == 0
+    # The unread entry and the UNVERIFIED one, but not the entry already read.
+    assert set(asked["keys"]) == {"new2024unread", "doe2010obscure"}
+
+
+def test_read_all_says_so_when_there_is_nothing_to_do(isolated):
+    run("new", "mylib", "--scope", "s")
+    lib = Library.open(isolated / "mylib")
+    lib.save_entry(make_entry())
+    r = run("--json", "read", "--all")
+    assert r.exit_code == 0
+    assert js(r)["read"] == []
+
+
+def test_ls_can_filter_for_unread(stocked):
+    stocked.save_entry(make_entry(
+        key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
+        one_liner=None, sections=[], status="unread",
+    ))
+    keys = [e["key"] for e in js(run("--json", "ls", "--status", "unread"))["entries"]]
+    assert keys == ["new2024unread"]

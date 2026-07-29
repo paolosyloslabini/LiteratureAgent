@@ -92,12 +92,23 @@ lit add 10.1145/3292500.3330701              # by DOI
 lit add arxiv:1706.03762                     # by arXiv id
 lit add "Some Paywalled Paper" --pdf ~/Downloads/paper.pdf
 lit find "LLM benchmarks for scientific discovery" -n 10 --json
+lit read <key> --json                        # read a filed paper in full
+lit read --all --level A -n 5 --json         # or work through the backlog
 ```
 
-- `add` fetches the paper, reads the **whole text**, and writes the summaries.
-- `find` runs several scout agents in parallel over different angles, mines the
-  reference lists of papers already in the library, de-duplicates everything,
-  then reads each survivor. Use `--dry-run` to see candidates without adding.
+- `add` fetches one paper, reads the **whole text**, and writes the summaries.
+- `find` searches Crossref, OpenAlex and arXiv several ways, mines the reference
+  lists of papers already in the library, de-duplicates everything, and ranks it
+  with one cheap call. It **files papers without reading them**: they get their
+  metadata, abstract and level, and `status: unread`. This is cheap — prefer it,
+  and do not apologize for the entries being unread.
+- `read` is the expensive step, bought per paper. Run it on the entries that
+  actually matter rather than on everything `find` returned. `find --read` does
+  it inline instead, and costs accordingly.
+- `find --parallel` adds LLM scout agents to the free search. It finds work
+  keyword search misses — adjacent fields, negative results — and costs real
+  tokens. Use it when the free search came back thin, not by default.
+- Use `--dry-run` to see candidates without adding any.
 - Entries below the library's quality bar are rejected; `--force` overrides.
 - If the full text can't be reached, the entry is stored **UNVERIFIED** with
   blank summaries. Never present an UNVERIFIED entry's content as if it were
@@ -150,9 +161,18 @@ lit import theirs.litlib --into my-library
    `lit add` it. Every key you cite must come from a command's output.
 3. **Quote from `lit ask`, not from memory.** Its quotes are copied out of the
    real text; anything you recall about a paper is not.
-4. **Check `status`.** `UNVERIFIED` means nobody has read it.
-5. Long-running commands (`find`, `ask`, `claim`) run several agents at once.
-   Run them in the background if the user is waiting, and tell them what's going.
+4. **Check `status`.** `unread` means the paper is filed but nobody has read it
+   yet — its abstract is real, its summaries are empty, and `lit read <key>`
+   fills them in. `UNVERIFIED` means the full text was looked for and could not
+   be found; only a PDF via `pdfs/inbox/` will fix that. Never present either
+   one's summary as if it existed.
+5. **Spend reads deliberately.** `lit read` and `lit find --read` are the only
+   commands that cost serious tokens. Reading twenty papers to answer one
+   question is the wrong shape: file cheaply with `find`, then read the few that
+   the user's question actually turns on.
+6. Long-running commands (`find --read`, `read`, `ask`, `claim`) run several
+   agents at once. Run them in the background if the user is waiting, and tell
+   them what's going.
 
 ## Setup, if `lit` isn't there
 

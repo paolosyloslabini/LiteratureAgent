@@ -127,14 +127,18 @@ def ask(
     # ---- 1. pick what to read -------------------------------------------
     ctx.log("[bold]Selecting[/bold] sources from the library…")
     sel = search(ctx, question, limit=read, pool=pool, level=level, tag=tag)
-    chosen = [m.entry for m in sel.matches if m.entry.is_verified][:read]
+    # An entry that was filed but never read is a perfectly good source here:
+    # `ask` fetches the full text itself. Only UNVERIFIED entries are skipped,
+    # because for those the full text was already looked for and not found.
+    chosen = [m.entry for m in sel.matches
+              if m.entry.is_verified or m.entry.is_unread][:read]
 
     if not chosen:
-        unread = [m.entry.key for m in sel.matches if not m.entry.is_verified]
+        blocked = [m.entry.key for m in sel.matches if not m.entry.is_verified]
         result.answer = (
             "No readable sources in this library match that question."
-            + (f" {len(unread)} matching entries are UNVERIFIED (no full text): "
-               f"{', '.join(unread[:5])}." if unread else "")
+            + (f" {len(blocked)} matching entries are UNVERIFIED (no full text): "
+               f"{', '.join(blocked[:5])}." if blocked else "")
         )
         return result
 
@@ -163,7 +167,8 @@ def ask(
         if ft is None:
             return Evidence(entry=entry, relevant=False,
                             error="full text no longer retrievable")
-        text, truncated = truncate_for_llm(ft.text, MAX_PROMPT_CHARS)
+        text, truncated = truncate_for_llm(ft.text, MAX_PROMPT_CHARS,
+                                           drop_references=True)
         data = ctx.llm.json(
             extract_evidence_prompt(
                 question=question, entry=entry, truncated=truncated

@@ -8,7 +8,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .models import STATUS_VERIFIED, Entry
+from .models import STATUS_UNREAD, STATUS_VERIFIED, Entry
 
 LEVEL_STYLE = {
     "A*": "bold green", "A": "green", "B": "yellow", "C": "red",
@@ -23,6 +23,9 @@ def level_text(level: str | None) -> Text:
 def status_text(status: str) -> Text:
     if status == STATUS_VERIFIED:
         return Text("read", style="green")
+    if status == STATUS_UNREAD:
+        # Not a problem, just work not yet paid for — hence cyan, not warning.
+        return Text("unread", style="cyan")
     return Text("UNVERIFIED", style="bold yellow")
 
 
@@ -95,6 +98,9 @@ def entry_panel(entry: Entry, *, full: bool = False) -> Panel:
 
     if entry.one_liner:
         lines += ["", f"> {entry.one_liner}"]
+    elif entry.is_unread:
+        lines += ["", f"> _Not read yet. `lit read {entry.key}` to fetch the full "
+                      "text and summarize it._"]
     elif not entry.is_verified:
         lines += ["", "> _No summary: the full text could not be retrieved._"]
 

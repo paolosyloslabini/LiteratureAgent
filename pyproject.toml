@@ -34,6 +34,9 @@ packages = ["src/lit"]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+    "real_cli_layer: exercises the `claude` subprocess plumbing; opts out of the conftest guard",
+]
 
 [tool.ruff]
 line-length = 100

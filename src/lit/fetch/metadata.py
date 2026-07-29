@@ -146,18 +146,29 @@ def from_arxiv(http: HttpClient, arxiv_id: str) -> PaperMeta | None:
     except ET.ParseError:
         return None
     entry = root.find("a:entry", _ATOM)
-    if entry is None or entry.find("a:title", _ATOM) is None:
+    if entry is None:
+        return None
+    return _arxiv_entry(entry, fallback_id=arxiv_id)
+
+
+def _arxiv_entry(entry, *, fallback_id: str = "") -> PaperMeta | None:
+    """One <entry> from an arXiv Atom feed. Shared by id lookup and search."""
+    if entry.find("a:title", _ATOM) is None:
         return None
 
     meta = PaperMeta(sources=["arxiv"], type="preprint")
     meta.title = _clean(_text(entry.find("a:title", _ATOM)))
+    if not meta.title:
+        return None
     meta.abstract = _clean(_text(entry.find("a:summary", _ATOM)))
     meta.authors = [
         _clean(_text(a.find("a:name", _ATOM)))
         for a in entry.findall("a:author", _ATOM)
     ]
     meta.authors = [a for a in meta.authors if a]
-    meta.arxiv_id = normalize_arxiv(_text(entry.find("a:id", _ATOM))) or arxiv_id
+    meta.arxiv_id = normalize_arxiv(_text(entry.find("a:id", _ATOM))) or fallback_id
+    if not meta.arxiv_id:
+        return None
     published = _text(entry.find("a:published", _ATOM))
     if published[:4].isdigit():
         meta.year = int(published[:4])
@@ -314,6 +325,122 @@ def from_semantic_scholar(http: HttpClient, ident: str, api_key: str = "",
 # Search + orchestration
 # --------------------------------------------------------------------------
 
+_OA_SEARCH_SELECT = (
+    "id,title,publication_year,doi,cited_by_count,primary_location,"
+    "open_access,best_oa_location,type,authorships,abstract_inverted_index"
+)
+
+
+def search_openalex(http: HttpClient, query: str, *, limit: int = 10,
+                    sort: str | None = None, from_year: int | None = None,
+                    kind: str | None = None) -> list[PaperMeta]:
+    """Keyword search against OpenAlex, with the facets `find` discovers on.
+
+    Free, structured, and hallucination-proof: every hit is a real indexed work
+    with its own identifiers and citation count. `sort`, `from_year` and `kind`
+    are what let one query be asked several different ways — most-cited,
+    published since a date, reviews only — which is the cheap equivalent of
+    pointing several scout agents at different angles.
+    """
+    params: dict = {"search": query, "per-page": max(1, limit),
+                    "select": _OA_SEARCH_SELECT}
+    filters = []
+    if from_year:
+        filters.append(f"from_publication_date:{from_year}-01-01")
+    if kind:
+        filters.append(f"type:{kind}")
+    if filters:
+        params["filter"] = ",".join(filters)
+    if sort:
+        params["sort"] = sort
+
+    data = http.get_json(OPENALEX_API, params=params)
+    out: list[PaperMeta] = []
+    for w in (data or {}).get("results") or []:
+        meta = _openalex_search_hit(w)
+        if meta is not None:
+            out.append(meta)
+    return out[:limit]
+
+
+def _openalex_search_hit(w: dict) -> PaperMeta | None:
+    title = w.get("title") or w.get("display_name") or ""
+    if not title:
+        return None
+    meta = PaperMeta(sources=["openalex"])
+    meta.title = title
+    meta.authors = [
+        a for a in (
+            (a.get("author") or {}).get("display_name", "")
+            for a in (w.get("authorships") or [])[:10]
+        ) if a
+    ]
+    meta.year = w.get("publication_year")
+    meta.doi = normalize_doi(w.get("doi"))
+    meta.citation_count = w.get("cited_by_count")
+    loc = w.get("primary_location") or {}
+    src = loc.get("source") or {}
+    meta.venue = src.get("display_name")
+    meta.type = _map_openalex_type(w.get("type", ""), src.get("type"))
+    oa = w.get("open_access") or {}
+    meta.is_oa = bool(oa.get("is_oa"))
+    best = w.get("best_oa_location") or {}
+    meta.oa_pdf_url = best.get("pdf_url") or oa.get("oa_url")
+    meta.url = loc.get("landing_page_url") or w.get("id")
+    if meta.oa_pdf_url and "arxiv" in str(meta.oa_pdf_url):
+        meta.arxiv_id = normalize_arxiv(meta.oa_pdf_url)
+    meta.abstract = _deinvert_abstract(w.get("abstract_inverted_index"))
+    return meta
+
+
+def _deinvert_abstract(index: dict | None) -> str:
+    """Rebuild OpenAlex's inverted abstract index into running text.
+
+    OpenAlex ships abstracts as {word: [positions]} rather than as a string.
+    Reassembling it costs nothing and gives the ranking call something to judge
+    beyond a bare title.
+    """
+    if not isinstance(index, dict) or not index:
+        return ""
+    words: list[tuple[int, str]] = []
+    for word, positions in index.items():
+        if not isinstance(positions, list):
+            continue
+        words += [(int(p), str(word)) for p in positions if isinstance(p, int)]
+    if not words:
+        return ""
+    words.sort()
+    return _clean(" ".join(w for _, w in words))
+
+
+def search_arxiv(http: HttpClient, query: str, *, limit: int = 10) -> list[PaperMeta]:
+    """Keyword search against arXiv. Catches preprints the indexes lag on.
+
+    Relevance order only. arXiv's `all:` treats a multi-word query loosely, so
+    sorting those matches by date returns whatever was submitted this morning
+    rather than recent work on the topic — recency is the OpenAlex facet's job,
+    where it is a filter on a real query rather than a sort over everything.
+    """
+    r = http.get(ARXIV_API, params={
+        "search_query": f"all:{query}",
+        "max_results": max(1, limit),
+        "sortBy": "relevance",
+        "sortOrder": "descending",
+    })
+    if r is None:
+        return []
+    try:
+        root = ET.fromstring(r.text)
+    except ET.ParseError:
+        return []
+    out: list[PaperMeta] = []
+    for entry in root.findall("a:entry", _ATOM):
+        meta = _arxiv_entry(entry)
+        if meta is not None:
+            out.append(meta)
+    return out[:limit]
+
+
 def search_works(http: HttpClient, query: str, limit: int = 10,
                  cfg: FetchConfig | None = None) -> list[PaperMeta]:
     """Title/keyword search. Crossref first, OpenAlex as a fallback."""
@@ -321,8 +448,10 @@ def search_works(http: HttpClient, query: str, limit: int = 10,
     data = http.get_json(
         CROSSREF_API,
         params={"query.bibliographic": query, "rows": limit,
+                # The abstract rides along because ranking a candidate pool from
+                # bare titles is guesswork; it costs nothing extra to ask for.
                 "select": "DOI,title,author,issued,container-title,type,"
-                          "is-referenced-by-count,URL"},
+                          "is-referenced-by-count,URL,abstract"},
     )
     for m in ((data or {}).get("message") or {}).get("items") or []:
         title = _first(m.get("title"))
@@ -337,38 +466,14 @@ def search_works(http: HttpClient, query: str, limit: int = 10,
         meta.type = _map_crossref_type(m.get("type", ""), meta.venue)
         meta.citation_count = m.get("is-referenced-by-count")
         meta.url = m.get("URL")
+        meta.abstract = _strip_tags(m.get("abstract") or "")
         out.append(meta)
 
     if len(out) < limit:
-        data = http.get_json(
-            OPENALEX_API,
-            params={"search": query, "per-page": limit,
-                    "select": "id,title,publication_year,doi,cited_by_count,"
-                              "primary_location,open_access,type,authorships"},
-        )
         seen = {m.doi for m in out if m.doi}
-        for w in (data or {}).get("results") or []:
-            doi = normalize_doi(w.get("doi"))
-            if doi and doi in seen:
+        for meta in search_openalex(http, query, limit=limit):
+            if meta.doi and meta.doi in seen:
                 continue
-            meta = PaperMeta(sources=["openalex"])
-            meta.title = w.get("title") or ""
-            if not meta.title:
-                continue
-            meta.authors = [
-                (a.get("author") or {}).get("display_name", "")
-                for a in (w.get("authorships") or [])
-            ]
-            meta.authors = [a for a in meta.authors if a]
-            meta.year = w.get("publication_year")
-            meta.doi = doi
-            meta.citation_count = w.get("cited_by_count")
-            loc = w.get("primary_location") or {}
-            meta.venue = (loc.get("source") or {}).get("display_name")
-            oa = w.get("open_access") or {}
-            meta.is_oa = bool(oa.get("is_oa"))
-            meta.oa_pdf_url = oa.get("oa_url")
-            meta.url = loc.get("landing_page_url")
             out.append(meta)
     return out[:limit]
 

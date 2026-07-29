@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from lit.actions.inbox import _guess_title, normalize_arxiv_from_header
-from lit.fetch.fulltext import MIN_USABLE_CHARS, html_to_text, truncate_for_llm
+from lit.fetch.fulltext import (
+    MIN_USABLE_CHARS,
+    html_to_text,
+    strip_reference_list,
+    truncate_for_llm,
+)
 from lit.fetch.metadata import _pick_openalex_record, synth_bibtex
 
 from factories import make_meta
@@ -52,6 +57,61 @@ def test_long_text_keeps_head_and_tail():
     assert out.startswith("HEAD")
     assert out.endswith("TAIL")  # the reference list lives at the end
     assert len(out) < 1200
+
+
+# --------------------------------------------------------------------------
+# Dropping the paper's own bibliography before a read
+# --------------------------------------------------------------------------
+
+def _paper(body: str, refs: str = "") -> str:
+    return f"Abstract\n\n{body}\n\nConclusion\n\nWe conclude.\n{refs}"
+
+
+def test_reference_list_is_dropped():
+    refs = "\nReferences\n\n" + "\n".join(f"[{i}] Someone. A paper. 2020."
+                                          for i in range(200))
+    text = _paper("Method. " * 400, refs)
+    out, removed = strip_reference_list(text)
+    assert removed > 0
+    assert "Someone. A paper." not in out
+    assert "We conclude." in out
+    assert out.endswith("[... reference list omitted ...]")
+
+
+def test_bibliography_and_works_cited_headings_are_recognized():
+    for heading in ("Bibliography", "WORKS CITED", "7. References"):
+        text = _paper("Body. " * 400, f"\n{heading}\n\n" + "Ref line.\n" * 200)
+        out, removed = strip_reference_list(text)
+        assert removed > 0, heading
+        assert "Ref line." not in out, heading
+
+
+def test_a_paper_with_no_reference_list_is_left_alone():
+    text = _paper("Body. " * 400)
+    out, removed = strip_reference_list(text)
+    assert removed == 0 and out == text
+
+
+def test_the_word_references_in_a_sentence_is_not_a_heading():
+    text = _paper("The paper references prior work throughout. " * 200)
+    out, removed = strip_reference_list(text)
+    assert removed == 0 and out == text
+
+
+def test_an_early_heading_does_not_take_the_body_with_it():
+    """A contents entry near the front must not truncate the whole paper."""
+    text = "References\n\n" + _paper("Body. " * 800)
+    out, removed = strip_reference_list(text)
+    assert removed == 0 and out == text
+
+
+def test_truncate_only_drops_references_when_asked():
+    refs = "\nReferences\n\n" + "Ref line.\n" * 300
+    text = _paper("Body. " * 400, refs)
+    kept, _ = truncate_for_llm(text, 1_000_000)
+    assert "Ref line." in kept
+    dropped, _ = truncate_for_llm(text, 1_000_000, drop_references=True)
+    assert "Ref line." not in dropped
 
 
 # --------------------------------------------------------------------------

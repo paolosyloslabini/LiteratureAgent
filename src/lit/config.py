@@ -79,6 +79,11 @@ class LLMConfig:
     timeout_s: int = 900
     # How many papers to read concurrently in `find` / `ask`.
     max_parallel: int = 4
+    # How much paper text goes into one reading prompt. `lit add` and `lit read`
+    # act on a paper you picked deliberately and get the generous budget;
+    # `lit find --read` reads a batch at once, so it gets a tighter one.
+    read_chars: int = 400_000
+    find_read_chars: int = 150_000
     # Retries on malformed JSON or a non-zero exit.
     max_retries: int = 2
     # Extra args passed through to the claude CLI, e.g. ["--effort", "high"].

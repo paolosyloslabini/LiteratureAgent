@@ -87,6 +87,11 @@ class FakeProc:
         self.returncode = returncode
 
 
+# These exercise the subprocess plumbing itself, so they opt out of the
+# conftest guard and stub `subprocess.run` directly.
+pytestmark = pytest.mark.real_cli_layer
+
+
 def _patch_run(monkeypatch, payload, capture, returncode=0):
     def fake_run(cmd, **kwargs):
         capture["cmd"] = cmd

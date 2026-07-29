@@ -32,6 +32,11 @@ ENTRY_TYPES = [
 
 STATUS_VERIFIED = "verified"
 STATUS_UNVERIFIED = "UNVERIFIED"
+# Stored deliberately without a read: the metadata and the publisher's abstract
+# are there, the summaries are not, and nothing was attempted. Distinct from
+# UNVERIFIED, which means a read *was* attempted and no full text could be
+# found. An unread entry is one `lit read <key>` away from a full record.
+STATUS_UNREAD = "unread"
 
 
 def level_rank(level: str | None) -> int:
@@ -161,6 +166,20 @@ class Entry:
     @property
     def is_verified(self) -> bool:
         return self.status == STATUS_VERIFIED
+
+    @property
+    def is_unread(self) -> bool:
+        """Stored without a read, and a read is still worth attempting."""
+        return self.status == STATUS_UNREAD
+
+    @property
+    def needs_read(self) -> bool:
+        """True for anything carrying no agent-written summary yet.
+
+        Covers both the deliberately unread and the entry whose full text could
+        not be retrieved at the time — `lit read` is willing to try either.
+        """
+        return not self.is_verified
 
     @property
     def is_partial_read(self) -> bool:
