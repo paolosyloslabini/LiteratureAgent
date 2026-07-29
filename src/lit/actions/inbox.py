@@ -117,7 +117,10 @@ def process_inbox(ctx: Ctx, *, keep: bool = False,
 
     if not keep:
         for item in result.items:
-            if item.result and item.result.ok and item.path.exists():
+            # Only files sitting in the inbox are ours to remove: `--add` points
+            # at the user's own copy, wherever they keep it.
+            if (item.result and item.result.ok and item.path.exists()
+                    and item.path.parent == lib.inbox_dir):
                 # The PDF now lives under pdfs/<key>.pdf; clear the inbox copy.
                 try:
                     item.path.unlink()
