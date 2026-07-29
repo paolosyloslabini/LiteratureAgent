@@ -34,7 +34,7 @@ def no_network(monkeypatch):
     `_lookup_meta` is the enrichment lookup, `_search_facet` the indexed search.
     """
     monkeypatch.setattr(D, "_lookup_meta", lambda ctx, c: None)
-    monkeypatch.setattr(D, "_search_facet", lambda ctx, q, facet, limit: [])
+    monkeypatch.setattr(D, "_search_facet", lambda ctx, q, facet, limit, plan: [])
 
 
 def stub_metadata(monkeypatch, by_title: dict):
@@ -47,10 +47,22 @@ def stub_metadata(monkeypatch, by_title: dict):
 
 def stub_search(monkeypatch, by_facet: dict):
     """Script what each free search facet returns, as PaperMeta records."""
-    def fake(ctx, query, facet, limit):
+    def fake(ctx, query, facet, limit, plan):
         return [PaperMeta(**spec) if isinstance(spec, dict) else spec
                 for spec in by_facet.get(facet, [])][:limit]
     monkeypatch.setattr(D, "_search_facet", fake)
+
+
+def record_search(monkeypatch, by_facet: dict | None = None) -> list[tuple]:
+    """Record every (query, facet, plan) the indexes are asked for."""
+    asked: list[tuple] = []
+
+    def fake(ctx, query, facet, limit, plan):
+        asked.append((query, facet, plan))
+        return [PaperMeta(**spec) if isinstance(spec, dict) else spec
+                for spec in (by_facet or {}).get(facet, [])][:limit]
+    monkeypatch.setattr(D, "_search_facet", fake)
+    return asked
 
 
 def hit(title, **kw):
@@ -83,27 +95,39 @@ class ScoutLLM:
 
     `relevance` maps title -> score for the ranking call. Anything unlisted
     scores 0.9, so a test only has to name the papers it cares about.
+
+    `plan` is what the planning call returns; the default is the plainest
+    possible reading of the query, so a test that is not about planning behaves
+    as though the query went to the indexes untouched.
     """
 
     available = True
 
-    def __init__(self, per_angle, relevance: dict | None = None):
+    def __init__(self, per_angle, relevance: dict | None = None,
+                 plan: dict | None = None):
         self.per_angle = per_angle
         self.relevance = relevance or {}
+        self.plan = {"queries": ["topic"], "topic": "topic"} if plan is None else plan
         self.prompts: list[str] = []
         self.rank_prompts: list[str] = []
+        self.plan_prompts: list[str] = []
+        self.scout_prompts: list[str] = []
         self.calls = 0
 
     def json(self, prompt, **kw):
         self.calls += 1
         self.prompts.append(prompt)
+        if kw.get("role") == "plan":
+            self.plan_prompts.append(prompt)
+            return dict(self.plan)
         if kw.get("role") == "rank":
             self.rank_prompts.append(prompt)
             return {"scores": [
                 {"index": i, "relevance": self.relevance.get(t, 0.9), "why": "fits"}
                 for i, t in _titles_in(prompt).items()
             ]}
-        idx = len([p for p in self.prompts if "Search from this specific angle" in p]) - 1
+        self.scout_prompts.append(prompt)
+        idx = len(self.scout_prompts) - 1
         return {"papers": self.per_angle[min(idx, len(self.per_angle) - 1)]}
 
 
@@ -155,8 +179,8 @@ def test_scouts_are_told_what_is_already_present(ctx):
     llm = ScoutLLM([[paper("New Thing")]])
     ctx._llm = llm
     discover(ctx, "topic", limit=5, angles=1, use_references=False, use_scouts=True)
-    assert "Attention Is All You Need" in llm.prompts[0]
-    assert "do not propose them again" in llm.prompts[0]
+    assert "Attention Is All You Need" in llm.scout_prompts[0]
+    assert "do not propose them again" in llm.scout_prompts[0]
 
 
 def test_limit_is_respected(ctx):
@@ -168,13 +192,12 @@ def test_limit_is_respected(ctx):
 def test_a_failing_scout_does_not_sink_the_run(ctx):
     class Flaky(ScoutLLM):
         def json(self, prompt, **kw):
-            self.calls += 1
-            self.prompts.append(prompt)
-            if self.calls == 1:
+            if kw.get("role") == "scout" and not self.scout_prompts:
+                self.scout_prompts.append(prompt)
                 raise RuntimeError("angle blew up")
-            return {"papers": [paper("Survivor")]}
+            return super().json(prompt, **kw)
 
-    ctx._llm = Flaky([])
+    ctx._llm = Flaky([[paper("Survivor")]])
     res = discover(ctx, "topic", limit=5, angles=2, use_references=False, use_scouts=True)
     assert [c.title for c in res.candidates] == ["Survivor"]
     assert res.scout_errors
@@ -192,9 +215,10 @@ def test_scouts_do_not_run_unless_asked_for(ctx, monkeypatch):
     res = discover(ctx, "topic", limit=5, use_references=False)
 
     assert [c.title for c in res.candidates] == ["Found For Free"]
-    assert not any("Search from this specific angle" in p for p in llm.prompts)
-    # One call, and it is the ranking pass — nothing else is model-driven.
-    assert llm.calls == 1
+    assert not llm.scout_prompts
+    # Two cheap calls, and only two: reading the query, and ranking the pool.
+    assert llm.calls == 2
+    assert len(llm.plan_prompts) == 1
     assert len(llm.rank_prompts) == 1
 
 
@@ -267,7 +291,7 @@ def test_abstracts_from_search_reach_the_ranking_call(ctx, monkeypatch):
 
 def test_a_failing_facet_does_not_sink_the_run(ctx, monkeypatch):
     ctx._llm = ScoutLLM([])
-    def flaky(ctx_, query, facet, limit):
+    def flaky(ctx_, query, facet, limit, plan):
         if facet == "foundational":
             raise RuntimeError("openalex is down")
         return [PaperMeta(**hit("Survivor"))] if facet == "relevance" else []
@@ -275,6 +299,240 @@ def test_a_failing_facet_does_not_sink_the_run(ctx, monkeypatch):
 
     res = discover(ctx, "topic", limit=5, use_references=False)
     assert [c.title for c in res.candidates] == ["Survivor"]
+
+
+# --------------------------------------------------------------------------
+# Query planning: the request is read into index parameters before anything runs
+# --------------------------------------------------------------------------
+
+def plan_llm(ctx, plan: dict, **kw):
+    """An LLM whose planning call returns `plan`. No scouts, ranking passes."""
+    llm = ScoutLLM([], plan=plan, **kw)
+    ctx._llm = llm
+    return llm
+
+
+def test_the_indexes_are_asked_the_planned_query_not_the_typed_one(ctx, monkeypatch):
+    asked = record_search(monkeypatch)
+    plan_llm(ctx, {"topic": "retrieval-augmented generation",
+                   "queries": ["retrieval augmented generation"]})
+
+    discover(ctx, "papers about RAG please, anything good", limit=5,
+             use_references=False)
+
+    assert {q for q, _, _ in asked} == {"retrieval augmented generation"}
+
+
+def test_alternate_phrasings_only_run_the_best_match_facet(ctx, monkeypatch):
+    """Re-asking 'most-cited' of a paraphrase returns what the first ask found."""
+    asked = record_search(monkeypatch)
+    plan_llm(ctx, {"queries": ["graph neural networks", "message passing networks"]})
+
+    discover(ctx, "GNNs", limit=5, use_references=False)
+
+    primary = {f for q, f, _ in asked if q == "graph neural networks"}
+    alternate = {f for q, f, _ in asked if q == "message passing networks"}
+    assert primary == {f for f, _ in D.SEARCH_FACETS}
+    assert alternate == {"relevance"}
+
+
+def test_a_year_window_reaches_every_index(ctx, monkeypatch):
+    asked = record_search(monkeypatch)
+    plan_llm(ctx, {"queries": ["diffusion models"], "year_from": 2022,
+                   "year_to": 2024})
+
+    discover(ctx, "diffusion models since 2022 but before 2025", limit=5,
+             use_references=False)
+
+    assert asked and all(p.year_from == 2022 and p.year_to == 2024
+                         for _, _, p in asked)
+
+
+def test_a_document_type_reaches_every_index(ctx, monkeypatch):
+    asked = record_search(monkeypatch)
+    plan_llm(ctx, {"queries": ["protein folding"], "kind": "review"})
+    discover(ctx, "surveys of protein folding", limit=5, use_references=False)
+    assert asked and all(p.kind == "review" for _, _, p in asked)
+
+
+def test_the_window_also_binds_the_sources_that_have_no_filter_field(ctx):
+    """A mined reference and a scouted title arrive with whatever year they have."""
+    for i in range(2):
+        ctx.library.save_entry(make_entry(
+            key=f"e{i}", title=f"Existing {i}", arxiv_id=f"100{i}.0000{i}",
+            references=[Reference(title="An Old Classic", year=1998),
+                        Reference(title="Recent Work", year=2023)],
+        ))
+    plan_llm(ctx, {"queries": ["topic"], "year_from": 2022})
+
+    res = discover(ctx, "topic since 2022", limit=10, use_references=True)
+
+    assert [c.title for c in res.candidates] == ["Recent Work"]
+    assert res.dropped_out_of_window == 1
+
+
+def test_a_candidate_with_no_year_survives_the_window(ctx):
+    """The window rules out what the request excluded; it is not a date test."""
+    ctx.library.save_entry(make_entry(
+        references=[Reference(title="Year Unknown")]))
+    plan_llm(ctx, {"queries": ["topic"], "year_from": 2022})
+    res = discover(ctx, "topic since 2022", limit=10, use_references=True)
+    assert [c.title for c in res.candidates] == ["Year Unknown"]
+
+
+def test_out_of_window_candidates_are_dropped_before_they_cost_ranking_tokens(ctx):
+    ctx.library.save_entry(make_entry(
+        references=[Reference(title="An Old Classic", year=1998)]))
+    llm = plan_llm(ctx, {"queries": ["topic"], "year_from": 2022})
+    discover(ctx, "topic since 2022", limit=10, use_references=True)
+    assert not llm.rank_prompts
+
+
+def test_the_reading_of_the_query_reaches_the_ranking_call(ctx, monkeypatch):
+    stub_search(monkeypatch, {"relevance": [hit("Something", year=2024)]})
+    llm = plan_llm(ctx, {"queries": ["sparse attention"], "year_from": 2023,
+                         "intent": "wants practical speedups, not theory"})
+
+    discover(ctx, "make transformers faster, recent stuff", limit=5,
+             use_references=False)
+
+    prompt = llm.rank_prompts[0]
+    # Scored against what was typed, with the plan's reading as context.
+    assert "make transformers faster, recent stuff" in prompt
+    assert "wants practical speedups, not theory" in prompt
+    assert "2023 or later" in prompt
+
+
+def test_the_constraints_are_given_to_the_scouts(ctx):
+    llm = plan_llm(ctx, {"queries": ["topic"], "year_to": 2015,
+                         "intent": "historical work only"})
+    llm.per_angle = [[paper("A Scouted Paper", year=2010)]]
+
+    discover(ctx, "topic before 2016", limit=5, angles=1, use_references=False,
+             use_scouts=True)
+
+    assert "2015 or earlier" in llm.scout_prompts[0]
+    assert "historical work only" in llm.scout_prompts[0]
+
+
+def test_planning_can_be_switched_off(ctx, monkeypatch):
+    """`--no-plan`: the string goes to the indexes exactly as typed."""
+    asked = record_search(monkeypatch)
+    llm = plan_llm(ctx, {"queries": ["something else entirely"]})
+
+    res = discover(ctx, "my raw query", limit=5, use_references=False,
+                   use_plan=False)
+
+    assert {q for q, _, _ in asked} == {"my raw query"}
+    assert not llm.plan_prompts
+    assert res.plan is not None and not res.plan.planned
+
+
+def test_a_failed_planning_call_falls_back_to_the_query_as_typed(ctx, monkeypatch):
+    from lit.llm import LLMError
+
+    class NoPlanning(ScoutLLM):
+        def json(self, prompt, **kw):
+            if kw.get("role") == "plan":
+                raise LLMError("planner blew up")
+            return super().json(prompt, **kw)
+
+    asked = record_search(monkeypatch, {"relevance": [hit("Found Anyway")]})
+    ctx._llm = NoPlanning([])
+
+    res = discover(ctx, "my raw query", limit=5, use_references=False)
+
+    assert {q for q, _, _ in asked} == {"my raw query"}
+    assert [c.title for c in res.candidates] == ["Found Anyway"]
+    assert not res.plan.planned
+
+
+def test_an_unavailable_llm_still_searches(ctx, monkeypatch):
+    class NoLLM:
+        available = False
+
+        def json(self, *a, **kw):
+            raise AssertionError("called a model that is not there")
+
+    asked = record_search(monkeypatch, {"relevance": [hit("Found Anyway")]})
+    ctx._llm = NoLLM()
+
+    res = discover(ctx, "my raw query", limit=5, use_references=False)
+    assert {q for q, _, _ in asked} == {"my raw query"}
+    assert [c.title for c in res.candidates] == ["Found Anyway"]
+
+
+# ---- reading the planner's reply, which is a cheap model's JSON -----------
+
+def test_read_plan_keeps_what_it_was_given():
+    plan = D.read_plan("raw", {
+        "topic": "retrieval augmented generation",
+        "queries": ["retrieval augmented generation", "RAG pipelines"],
+        "tags": ["Retrieval Augmented", "LLM"],
+        "year_from": 2022, "year_to": 2024, "kind": "review",
+        "intent": "wants surveys",
+    })
+    assert plan.planned and plan.query == "raw"
+    assert plan.primary == "retrieval augmented generation"
+    assert plan.alternates == ["RAG pipelines"]
+    assert plan.tags == ["retrieval-augmented", "llm"]
+    assert (plan.year_from, plan.year_to, plan.kind) == (2022, 2024, "review")
+
+
+def test_read_plan_falls_back_when_no_query_comes_back():
+    plan = D.read_plan("raw query", {"queries": [], "topic": ""})
+    assert not plan.planned
+    assert plan.primary == "raw query"
+
+
+def test_read_plan_uses_the_topic_when_no_queries_come_back():
+    plan = D.read_plan("raw", {"queries": [], "topic": "sparse attention"})
+    assert plan.planned and plan.primary == "sparse attention"
+
+
+def test_read_plan_discards_an_implausible_year():
+    plan = D.read_plan("raw", {"queries": ["topic"], "year_from": 12,
+                               "year_to": 9999})
+    assert (plan.year_from, plan.year_to) == (None, None)
+
+
+def test_read_plan_straightens_a_reversed_window():
+    plan = D.read_plan("raw", {"queries": ["topic"], "year_from": 2024,
+                               "year_to": 2020})
+    assert (plan.year_from, plan.year_to) == (2020, 2024)
+
+
+def test_read_plan_rejects_a_document_type_that_is_not_one():
+    plan = D.read_plan("raw", {"queries": ["topic"], "kind": "seminal"})
+    assert plan.kind is None
+
+
+def test_read_plan_understands_the_word_people_use_for_a_type():
+    assert D.read_plan("raw", {"queries": ["topic"], "kind": "surveys"}).kind \
+        == "review"
+
+
+def test_read_plan_caps_and_deduplicates_the_queries():
+    plan = D.read_plan("raw", {"queries": ["a topic", "A Topic", "another",
+                                           "a third", "a fourth"]})
+    assert plan.queries == ["a topic", "another", "a third"]
+    assert len(plan.queries) == D.MAX_PLAN_QUERIES
+
+
+def test_a_plan_with_no_window_allows_everything():
+    plan = D.read_plan("raw", {"queries": ["topic"]})
+    assert plan.allows(1970) and plan.allows(None) and not plan.constraints()
+
+
+def test_the_recency_facet_stands_down_when_the_window_closes_before_it(ctx,
+                                                                       monkeypatch):
+    """'Recent' and 'nothing after 2010' contradict; the request wins."""
+    calls = []
+    monkeypatch.setattr(D, "search_openalex",
+                        lambda *a, **kw: calls.append(kw) or [])
+    plan = D.read_plan("raw", {"queries": ["topic"], "year_to": 2010})
+    assert D._search_facet(ctx, "topic", "recent", 5, plan) == []
+    assert not calls
 
 
 # --------------------------------------------------------------------------
@@ -374,8 +632,7 @@ def test_scouts_are_also_told_about_mined_candidates(ctx):
     llm = ScoutLLM([[paper("Fresh Web Result")]])
     ctx._llm = llm
     discover(ctx, "topic", limit=10, angles=1, use_references=True, use_scouts=True)
-    scout_prompt = [p for p in llm.prompts if "Search from this specific angle" in p][0]
-    assert "Mined Work" in scout_prompt
+    assert "Mined Work" in llm.scout_prompts[0]
 
 
 def test_web_can_be_disabled(ctx, monkeypatch):

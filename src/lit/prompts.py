@@ -35,6 +35,13 @@ SCOUT_SYSTEM = (
     "an id you are not sure about must be left null rather than guessed."
 )
 
+PLANNER_SYSTEM = (
+    "You are a reference librarian taking a request at the desk and writing "
+    "down what to type into the catalogue. You restate what you were asked in "
+    "the vocabulary the literature uses; you never widen the request, narrow "
+    "it, or add a condition the person did not state."
+)
+
 # How much of each abstract the ranking call sees. Enough to tell what a paper
 # actually does; short enough that a 40-candidate pool stays a cheap call.
 ABSTRACT_SNIPPET = 260
@@ -153,8 +160,72 @@ def read_paper_prompt(
 # Discovery
 # --------------------------------------------------------------------------
 
+def plan_query_prompt(*, query: str, scope: str, this_year: int,
+                      max_queries: int, kinds: list[str]) -> str:
+    """Read a plain-language request into parameters an index can be given.
+
+    The cheapest call in the tool, and the one that decides what every other
+    source is asked. A person types "recent surveys on retrieval-augmented
+    generation, nothing before 2022" — Crossref and OpenAlex have fields for
+    two thirds of that, but only if someone splits the sentence into a topic, a
+    date window and a document type first. Handed the sentence whole, they
+    match "recent", "nothing" and "before" as search terms.
+
+    It is deliberately an extraction job, not a research one: pull out what the
+    request already says, phrase the topic the way the literature phrases it,
+    and leave every field the request does not mention null.
+    """
+    schema = {
+        "topic": "string — the subject alone, as a noun phrase, with every "
+                 "instruction, filter and pleasantry stripped out",
+        "queries": [
+            f"string — up to {max_queries} keyword queries for a bibliographic "
+            "index, most direct first. Vary the vocabulary, not the meaning: a "
+            "second phrasing should use the terms a different community would "
+            "use for the same thing. No boolean operators, no quotes, no dates."
+        ],
+        "tags": ["string — 3-6 lowercase topical tags for the papers this "
+                 "finds; single words or hyphenated-phrases"],
+        "year_from": "number|null — earliest publication year the request asks "
+                     f"for. The current year is {this_year}.",
+        "year_to": "number|null — latest publication year the request asks for",
+        "kind": f"string|null — one of: {', '.join(kinds)}. Only when the "
+                "request explicitly asks for that kind of document.",
+        "intent": "string — one sentence on what this person is actually "
+                  "looking for, for whoever ranks the results",
+    }
+    parts = [
+        "Turn this literature search request into search parameters:",
+        f"  {query!r}",
+    ]
+    if scope:
+        parts.append(f"The library it is going into is scoped to: {scope!r}.")
+    parts += [
+        "",
+        "Rules:",
+        "- Extract, do not invent. Every field the request does not imply is "
+        "null or empty. Do not add a date window, a document type or a "
+        "sub-topic the person did not ask for.",
+        "- Resolve relative dates against the current year: 'the last five "
+        f"years' means year_from {this_year - 4}, 'since the transformer "
+        "paper' means 2017, 'recent' on its own is not a date — leave it null "
+        "and let ranking handle it.",
+        "- Queries are for a keyword index, so use the field's own terms: "
+        "spell out an acronym the first time, drop stop words, and keep each "
+        "query to a handful of content words.",
+        "- If the request names a specific paper, method, author or venue, "
+        "keep that name in the queries verbatim — it is the strongest term "
+        "you have.",
+        "",
+        "Reply with a single JSON object, no markdown fence, matching this shape:",
+        json.dumps(schema, indent=2),
+    ]
+    return "\n".join(parts)
+
+
 def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
-                    exclude_titles: list[str]) -> str:
+                    exclude_titles: list[str], intent: str = "",
+                    constraints: tuple[str, ...] = ()) -> str:
     schema = {
         "papers": [
             {
@@ -172,8 +243,14 @@ def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
         f"Find up to {limit} high-quality published papers matching this request:",
         f"  {query!r}",
     ]
+    if intent:
+        parts.append(f"What that asks for: {intent}")
     if scope:
         parts.append(f"They must fit a library scoped to: {scope!r}.")
+    if constraints:
+        parts += ["", "The request sets these limits — a paper outside them is "
+                      "not an answer, however good it is:"]
+        parts += [f"  - {c}" for c in constraints]
     parts += [
         "",
         f"Search from this specific angle: {angle}",
@@ -206,7 +283,9 @@ def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
     return "\n".join(parts)
 
 
-def rank_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
+def rank_candidates_prompt(*, query: str, scope: str, candidates: list,
+                           intent: str = "",
+                           constraints: tuple[str, ...] = ()) -> str:
     """Score the whole candidate pool for relevance to the query.
 
     Every candidate is scored by the same call regardless of where it came
@@ -258,7 +337,12 @@ def rank_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
     }
     return "\n".join([
         f"Query: {query!r}",
+        f"What that asks for: {intent}" if intent else "",
         f"Library scope: {scope!r}" if scope else "",
+        ("The request also sets these limits: " + "; ".join(constraints)
+         + ". A paper that breaks one does not answer the query, however good "
+           "it is on the topic — score it accordingly."
+         if constraints else ""),
         "",
         "Below are candidate papers gathered for that query. Score how well each "
         "one actually answers it. Score every candidate — do not omit any, and do "

@@ -102,6 +102,13 @@ lit read --all --level A -n 5 --json         # or work through the backlog
   with one cheap call. It **files papers without reading them**: they get their
   metadata, abstract and level, and `status: unread`. This is cheap — prefer it,
   and do not apologize for the entries being unread.
+- Give `find` the request in plain language, including any date or document-type
+  condition — "surveys of retrieval-augmented generation since 2022". One cheap
+  call reads it into a topic, alternate phrasings, a year window and a document
+  type before the indexes are asked, and the `plan` key in `--json` reports what
+  it understood. Do not pre-flatten the request into keywords yourself, and do
+  not run several `find`s for one question. `--no-plan` searches the string
+  verbatim.
 - `read` is the expensive step, bought per paper. Run it on the entries that
   actually matter rather than on everything `find` returned. `find --read` does
   it inline instead, and costs accordingly.

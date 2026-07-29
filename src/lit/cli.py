@@ -419,22 +419,31 @@ def cmd_find(
     no_web: bool = typer.Option(
         False, "--no-web",
         help="Skip the online search entirely; use only what your library cites."),
+    no_plan: bool = typer.Option(
+        False, "--no-plan",
+        help="Search your query verbatim instead of reading it into a topic, "
+             "year window and document type first."),
     force: bool = typer.Option(False, "--force", "-f", help="Ignore the quality bar."),
     tag: list[str] = typer.Option([], "--tag", "-t", help="Tag everything added."),
 ):
     """Search a topic and add the papers that fit.
 
-    The default path spends no tokens on searching: Crossref, OpenAlex and
-    arXiv are queried several ways, the references of your own entries are
-    mined, and one cheap call ranks the pool against your query. Papers are
-    filed from their metadata; `--read` (or `lit read` afterwards) buys the
-    full section-by-section summaries.
+    Write the request the way you would say it — "surveys of retrieval-
+    augmented generation since 2022" — and one cheap call turns it into what
+    the indexes can answer: a topic, alternate phrasings, a year window, a
+    document type. `--no-plan` searches the string verbatim instead.
+
+    Beyond that the default path spends nothing on searching: Crossref,
+    OpenAlex and arXiv are queried several ways, the references of your own
+    entries are mined, and one cheap call ranks the pool against your query.
+    Papers are filed from their metadata; `--read` (or `lit read` afterwards)
+    buys the full section-by-section summaries.
     """
     ctx = _ctx()
     try:
         found = discover(ctx, query, limit=limit, angles=angles,
                          use_references=not no_refs, use_web=not no_web,
-                         use_scouts=parallel)
+                         use_scouts=parallel, use_plan=not no_plan)
 
         if not found.candidates:
             msg = "No new candidates found."
@@ -462,8 +471,13 @@ def cmd_find(
                 console.print("[dim]Nothing selected.[/dim]")
                 return
 
+        # The plan's tags go on everything this find files. An unread entry has
+        # no agent-written tags of its own — these are the only handle `lit
+        # search -t` will have on it until someone pays to read it.
+        tags = list(tag) + [t for t in (found.plan.tags if found.plan else [])
+                            if t not in tag]
         found.unread = not read
-        found.added = add_candidates(ctx, chosen, force=force, extra_tags=list(tag),
+        found.added = add_candidates(ctx, chosen, force=force, extra_tags=tags,
                                      read=read)
         for res in found.added:
             if res.entry:

@@ -9,7 +9,13 @@ from lit.fetch.fulltext import (
     strip_reference_list,
     truncate_for_llm,
 )
-from lit.fetch.metadata import _pick_openalex_record, synth_bibtex
+from lit.fetch.metadata import (
+    _pick_openalex_record,
+    search_arxiv,
+    search_openalex,
+    search_works,
+    synth_bibtex,
+)
 
 from factories import make_meta
 
@@ -254,3 +260,88 @@ def test_merging_a_supplementary_record_preserves_the_authoritative_one():
     assert arxiv_record.year == 2017
     assert arxiv_record.venue is None
     assert arxiv_record.citation_count == 6597   # metrics adopted
+
+
+# --------------------------------------------------------------------------
+# Search parameters: the year window and document type a query implies
+#
+# Each index spells these differently, and getting one wrong fails silently —
+# the request still returns papers, just not the ones that were asked for.
+# --------------------------------------------------------------------------
+
+class RecordingHttp:
+    """Enough of HttpClient to see what a search actually asked the index."""
+
+    def __init__(self, payload: dict | None = None):
+        self.calls: list[tuple[str, dict]] = []
+        self.payload = payload or {}
+
+    def get_json(self, url, params=None, **kw):
+        self.calls.append((url, dict(params or {})))
+        return self.payload
+
+    def get(self, url, params=None, **kw):
+        self.calls.append((url, dict(params or {})))
+        return None
+
+    @property
+    def params(self) -> dict:
+        return self.calls[0][1]
+
+
+def test_openalex_search_sends_the_year_window():
+    http = RecordingHttp()
+    search_openalex(http, "topic", from_year=2020, to_year=2024)
+    assert "from_publication_date:2020-01-01" in http.params["filter"]
+    assert "to_publication_date:2024-12-31" in http.params["filter"]
+
+
+def test_openalex_search_sends_the_document_type():
+    http = RecordingHttp()
+    search_openalex(http, "topic", kind="review")
+    assert "type:review" in http.params["filter"]
+
+
+def test_openalex_search_without_constraints_sends_no_filter():
+    http = RecordingHttp()
+    search_openalex(http, "topic")
+    assert "filter" not in http.params
+
+
+def test_crossref_search_sends_the_year_window():
+    http = RecordingHttp()
+    search_works(http, "topic", 5, from_year=2020, to_year=2024)
+    assert http.params["filter"] == "from-pub-date:2020-01-01,until-pub-date:2024-12-31"
+
+
+def test_crossref_search_sends_an_open_ended_window():
+    http = RecordingHttp()
+    search_works(http, "topic", 5, from_year=2020)
+    assert http.params["filter"] == "from-pub-date:2020-01-01"
+
+
+def test_crossref_search_without_a_window_sends_no_filter():
+    http = RecordingHttp()
+    search_works(http, "topic", 5)
+    assert "filter" not in http.params
+
+
+def test_the_window_reaches_the_openalex_fallback_too():
+    """Crossref coming back short must not silently drop the constraint."""
+    http = RecordingHttp()
+    search_works(http, "topic", 5, from_year=2020)
+    fallback = [p for url, p in http.calls if "openalex" in url]
+    assert fallback and "from_publication_date:2020-01-01" in fallback[0]["filter"]
+
+
+def test_arxiv_search_sends_the_year_window_as_a_submission_range():
+    http = RecordingHttp()
+    search_arxiv(http, "topic", from_year=2020, to_year=2024)
+    assert http.params["search_query"] == \
+        "(all:topic) AND submittedDate:[202001010000 TO 202412312359]"
+
+
+def test_arxiv_search_without_a_window_stays_a_plain_query():
+    http = RecordingHttp()
+    search_arxiv(http, "topic")
+    assert http.params["search_query"] == "all:topic"

@@ -61,7 +61,7 @@ lit add 10.1145/3292500.3330701              # by DOI
 lit add arxiv:1706.03762                     # by arXiv id
 lit add "Paywalled Paper" --pdf ~/Downloads/paper.pdf
 
-lit find "benchmarks for scientific discovery" -n 10   # files them, reads nothing
+lit find "benchmarks for scientific discovery since 2023" -n 10  # files them, reads nothing
 lit read --all --level A         # read the good ones, when you want them read
 lit find "..." --parallel        # add LLM scouts to the free index search
 
@@ -165,21 +165,44 @@ no LLM call, nothing re-read, summaries and notes untouched.
 
 ### `find` spends API calls, not tokens
 
-One process builds the whole candidate pool and de-duplicates it *before* any
-expensive work starts, so two agents never handle the same paper. Everything on
-the default path is free:
+Ask for what you actually want, in a sentence:
+
+```bash
+lit find "surveys of retrieval-augmented generation since 2022"
+```
+
+A keyword index cannot answer that sentence — handed it whole, Crossref matches
+`surveys` and `since` as search terms. So the first thing `find` does is spend
+one cheap call reading the request into parameters an index *does* have fields
+for: the topic in the field's own vocabulary, a couple of alternate phrasings
+for the communities that name it differently, a year window, a document type.
+It prints what it understood before spending anything else, and `--no-plan`
+searches your string verbatim instead.
+
+The year window and document type then bind every source, not just the ones
+with a filter field — a reference mined from your own library and a title a
+scout came back with are held to "since 2022" too. The tags it derives go on
+everything the run files, which is the only handle an unread entry has until
+someone reads it.
+
+One process then builds the whole candidate pool and de-duplicates it *before*
+any expensive work starts, so two agents never handle the same paper. From here
+everything is free:
 
 1. **Reference mining** — hallucination-proof. Works cited by several papers
    already in your library, but missing from it, are exactly the gaps worth
    filling.
-2. **Indexed search** across Crossref, OpenAlex and arXiv. The same query is
+2. **Indexed search** across Crossref, OpenAlex and arXiv. The planned query is
    asked five ways — best keyword match, most-cited, published in the last two
    years, reviews only, arXiv preprints — because one query asked one way
-   returns a monoculture. Each facet is a plain HTTP request returning real
-   works with real DOIs, citation counts and abstracts.
+   returns a monoculture. Alternate phrasings are asked on best-match only:
+   re-running "most-cited" over a paraphrase returns what the first phrasing
+   already found. Each facet is a plain HTTP request returning real works with
+   real DOIs, citation counts and abstracts.
 
-That is the whole search. No agent runs, and the only model call in the entire
-command is the single pass that ranks the pool.
+That is the whole search. No agent runs, and the only model calls in the entire
+command are the one that reads your query and the one that ranks the pool —
+both on the cheapest model configured.
 
 **`--parallel` adds the scout agents** on top: LLM agents searching the web, one
 per angle. They cost real tokens — an agentic loop re-sends its transcript every
@@ -301,6 +324,7 @@ read_chars = 400_000    # paper text per reading prompt (`lit add`, `lit read`)
 find_read_chars = 150_000   # tighter budget for `lit find --read`, a whole batch
 
 [llm.models]            # cheap steps run cheap
+plan = "haiku"          # reading your query into index search parameters
 scout = "haiku"         # web search for candidates
 filter = "haiku"        # filtering library hits
 rank = "haiku"          # scoring candidates for relevance to the query

@@ -8,7 +8,7 @@ import pytest
 from factories import make_entry
 from typer.testing import CliRunner
 
-from lit.actions.discover import Candidate, FindResult
+from lit.actions.discover import Candidate, FindResult, SearchPlan
 from lit.cli import app, state
 from lit.library import Library
 
@@ -444,6 +444,34 @@ def test_find_read_opts_into_the_reader_agents(stocked, monkeypatch):
     r = run("--json", "-y", "find", "a topic", "--read")
     assert r.exit_code == 0
     assert seen["read"] is True
+
+
+def test_find_plans_the_query_unless_told_not_to(stocked, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("lit.cli.discover",
+                        lambda ctx, q, **kw: (seen.update(kw), FindResult())[1])
+
+    run("--json", "-y", "find", "a topic")
+    assert seen["use_plan"] is True
+
+    run("--json", "-y", "find", "a topic", "--no-plan")
+    assert seen["use_plan"] is False
+
+
+def test_find_tags_what_it_files_with_the_plan_tags(stocked, monkeypatch):
+    """An unread entry has no tags of its own; these are the only handle on it."""
+    seen = {}
+    plan = SearchPlan(query="a topic", tags=["benchmarks", "agents"], planned=True)
+    monkeypatch.setattr("lit.cli.discover",
+                        lambda ctx, q, **kw: FindResult(
+                            plan=plan, candidates=[Candidate(title="A Candidate")]))
+    monkeypatch.setattr("lit.cli.add_candidates",
+                        lambda ctx, c, **kw: (seen.update(kw), [])[1])
+
+    r = run("--json", "-y", "find", "a topic", "--tag", "mine")
+    assert r.exit_code == 0
+    assert seen["extra_tags"] == ["mine", "benchmarks", "agents"]
+    assert js(r)["plan"]["tags"] == ["benchmarks", "agents"]
 
 
 def test_read_needs_a_target(stocked):
