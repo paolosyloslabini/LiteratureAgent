@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from .library import Library
 from .models import Entry, level_rank
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
@@ -46,6 +46,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
     title,
     authors,
     one_liner,
+    abstract,
     tags,
     summary,
     findings,
@@ -66,8 +67,10 @@ CREATE INDEX IF NOT EXISTS idx_refs_doi    ON refs(cited_doi);
 """
 
 # bm25 column weights, in declared FTS column order. Title and one-liner carry
-# the most signal; notes are the user's own words so they matter a lot too.
-_BM25_WEIGHTS = (0.0, 8.0, 2.0, 6.0, 4.0, 1.0, 3.0, 5.0)
+# the most signal; notes are the user's own words so they matter a lot too. The
+# abstract and the detailed summary are long and repeat the rest, so they rank
+# low — they are there to catch the query nothing else matches.
+_BM25_WEIGHTS = (0.0, 8.0, 2.0, 6.0, 2.0, 4.0, 1.0, 3.0, 5.0)
 
 
 @dataclass
@@ -168,11 +171,11 @@ class Store:
             ),
         )
         conn.execute(
-            "INSERT INTO entries_fts(key,title,authors,one_liner,tags,summary,findings,notes)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO entries_fts(key,title,authors,one_liner,abstract,tags,"
+            "summary,findings,notes) VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 e.key, e.title, ", ".join(e.authors), e.one_liner or "",
-                " ".join(e.tags), e.detailed_summary_md(),
+                e.abstract, " ".join(e.tags), e.detailed_summary_md(),
                 "\n".join(e.key_findings), e.notes,
             ),
         )

@@ -8,10 +8,13 @@ The spec is strict about this path, and so is the code:
   step working off notes.
 * A paper that cannot be retrieved is stored anyway, flagged UNVERIFIED, with
   its summaries left blank. Nothing is inferred from the abstract.
+* A code link is recorded only when the paper's own text prints it. A model's
+  recollection of where a project lives is not evidence.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -26,6 +29,7 @@ from ..models import (
     Reference,
     Section,
     make_key,
+    normalize_code_url,
 )
 from ..prompts import READER_SYSTEM, read_paper_prompt
 from ..quality import LevelVerdict, assess, passes_quality_bar
@@ -202,7 +206,7 @@ def add_paper(
             entry=entry, verdict=verdict, meta=meta, warnings=warnings,
         )
 
-    _apply_reading(entry, data, meta, verdict, extra_tags)
+    _apply_reading(entry, data, meta, verdict, extra_tags, text)
     entry.status = STATUS_VERIFIED
     entry.read_source = ft.source
     entry.pdf_path = _rel(ft.pdf_path, lib.path)
@@ -250,6 +254,9 @@ def _base_entry(key: str, meta: PaperMeta, verdict: LevelVerdict,
         status=STATUS_UNVERIFIED,
         level=verdict.level,
         level_reason=verdict.reason,
+        # The publisher's own abstract. It comes from the metadata APIs, so an
+        # entry that never gets read still carries it.
+        abstract=meta.abstract,
         citation_count=meta.citation_count,
         references=list(meta.references),
         bibtex=meta.bibtex,
@@ -258,7 +265,8 @@ def _base_entry(key: str, meta: PaperMeta, verdict: LevelVerdict,
 
 
 def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
-                   verdict: LevelVerdict, extra_tags: list[str] | None) -> None:
+                   verdict: LevelVerdict, extra_tags: list[str] | None,
+                   text: str) -> None:
     """Copy the reader agent's output onto the entry, with light validation."""
     one = str(data.get("one_liner") or "").strip()
     entry.one_liner = one or None
@@ -295,6 +303,8 @@ def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
             regenerated = replace(meta, venue=entry.venue, type=entry.type)
             entry.bibtex = synth_bibtex(regenerated)
 
+    entry.code_url = _code_url_from_reading(data.get("code_url"), text)
+
     if verdict.needs_judgement:
         lvl = str(data.get("level") or "").strip()
         if lvl in ("A*", "A", "B", "C"):
@@ -308,6 +318,26 @@ def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
     # References come from the metadata APIs, never from the model — a model
     # asked to list references will happily hallucinate plausible ones.
     entry.references = list(meta.references)
+
+
+def _code_url_from_reading(raw: object, text: str) -> str | None:
+    """Accept the reader's repository link only if the paper really prints it.
+
+    Asked for a repo, a model will otherwise offer a plausible one from memory —
+    the right lab, a URL that never appears in the paper and often does not
+    exist. So the link has to be found in the very text the model was given.
+    Both sides are folded to bare alphanumerics before comparing, because PDF
+    extraction routinely breaks a long URL across lines or drops its scheme.
+    """
+    url = normalize_code_url(raw if isinstance(raw, str) else None)
+    if not url:
+        return None
+    needle = _fold(url.split("://", 1)[-1])
+    return url if needle and needle in _fold(text) else None
+
+
+def _fold(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
 def _norm_tags(tags: list[str]) -> list[str]:

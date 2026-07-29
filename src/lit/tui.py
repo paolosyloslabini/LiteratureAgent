@@ -190,6 +190,10 @@ class BrowserApp(App):
             parts += ["", "> _Full text unavailable — no summary was written._"]
         if entry.tags:
             parts += ["", "Tags: " + ", ".join(f"`{t}`" for t in entry.tags)]
+        if entry.code_url:
+            parts += ["", f"Code: {entry.code_url}"]
+        if entry.abstract.strip():
+            parts += ["", "## Abstract", "", entry.abstract.strip()]
         if entry.key_findings:
             parts += ["", "## Key findings", ""]
             parts += [f"- {f}" for f in entry.key_findings]

@@ -84,6 +84,8 @@ def entry_panel(entry: Entry, *, full: bool = False) -> Panel:
         lines.append(f"*Level: {entry.level_reason}*")
     if entry.url:
         lines.append(entry.url)
+    if entry.code_url:
+        lines.append(f"Code: {entry.code_url}")
 
     if entry.is_partial_read:
         lines.append(
@@ -98,6 +100,9 @@ def entry_panel(entry: Entry, *, full: bool = False) -> Panel:
 
     if entry.tags:
         lines += ["", "Tags: " + ", ".join(f"`{t}`" for t in entry.tags)]
+
+    if full and entry.abstract.strip():
+        lines += ["", "**Abstract**", "", entry.abstract.strip()]
 
     if entry.key_findings:
         lines += ["", "**Key findings**", ""]

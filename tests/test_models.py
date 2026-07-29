@@ -7,6 +7,7 @@ from lit.models import (
     make_key,
     meets_min_level,
     normalize_arxiv,
+    normalize_code_url,
     normalize_doi,
     slugify,
 )
@@ -109,3 +110,57 @@ def test_entry_citation(entry):
 def test_entry_searchable_text_includes_notes(entry):
     entry.notes = "MYUNIQUETOKEN"
     assert "MYUNIQUETOKEN" in entry.searchable_text()
+
+
+def test_entry_searchable_text_includes_the_abstract(entry):
+    entry.abstract = "ABSTRACTTOKEN"
+    assert "ABSTRACTTOKEN" in entry.searchable_text()
+
+
+# --------------------------------------------------------------------------
+# Code / artifact repository links
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("https://github.com/google/flax", "https://github.com/google/flax"),
+    # Papers print these mid-sentence, so the punctuation has to come off.
+    ("https://github.com/google/flax.", "https://github.com/google/flax"),
+    ("(https://github.com/google/flax)", "https://github.com/google/flax"),
+    ("(https://github.com/google/flax).", "https://github.com/google/flax"),
+    ("<https://github.com/google/flax>", "https://github.com/google/flax"),
+    ("https://github.com/google/flax/", "https://github.com/google/flax"),
+    # A footnote link often loses its scheme in extraction.
+    ("github.com/google/flax", "https://github.com/google/flax"),
+    ("www.github.com/google/flax", "https://github.com/google/flax"),
+    ("http://github.com/google/flax", "https://github.com/google/flax"),
+    ("https://GitHub.com/google/Flax", "https://github.com/google/Flax"),
+    # A deep link is a fine answer; the fragment is not part of the identity.
+    ("https://github.com/google/flax/tree/main/examples#readme",
+     "https://github.com/google/flax/tree/main/examples"),
+    # Artifact hosts, where a single path segment is the whole record.
+    ("https://zenodo.org/records/8329395", "https://zenodo.org/records/8329395"),
+    ("https://huggingface.co/datasets/squad",
+     "https://huggingface.co/datasets/squad"),
+    ("https://osf.io/ab12c", "https://osf.io/ab12c"),
+])
+def test_normalize_code_url_accepts_repositories(raw, expected):
+    assert normalize_code_url(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    None,
+    "",
+    "   ",
+    # Not a code host: a project page, a DOI or the paper itself.
+    "https://sites.google.com/view/our-project",
+    "https://doi.org/10.1145/3292500.3330701",
+    "https://arxiv.org/abs/1706.03762",
+    # A host with no project on it is not a repository.
+    "https://github.com",
+    "https://github.com/",
+    "https://github.com/deepmind",
+    # Prose, not a URL.
+    "code available on request",
+])
+def test_normalize_code_url_rejects_non_repositories(raw):
+    assert normalize_code_url(raw) is None
