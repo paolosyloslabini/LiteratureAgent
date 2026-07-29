@@ -12,9 +12,10 @@ import pytest
 from factories import make_entry
 
 from lit.actions.add import AddResult
+from lit.actions.code import CodeResult
 from lit.config import Config
-from lit.models import STATUS_UNREAD
-from lit.tui import BrowserApp, ConfirmDelete, ConfirmRead
+from lit.models import CODE_FROM_WEB, STATUS_UNREAD
+from lit.tui import BrowserApp, ConfirmDelete, ConfirmFindCode, ConfirmRead
 
 
 @pytest.fixture
@@ -455,3 +456,151 @@ async def test_open_code_says_so_when_there_is_no_repository(app, monkeypatch):
         app.action_cycle_filter()  # -> unread: the entry with no code link
         await pilot.pause()
         app.action_open_code()  # must not raise, must not open
+
+
+# --------------------------------------------------------------------------
+# Finding code
+# --------------------------------------------------------------------------
+
+def _stub_find(monkeypatch, calls, *, result=None, boom=False):
+    """Stand in for the action, so no agent and no network are reached."""
+    def fake(ctx, entries, **kw):
+        calls.append((entries[0].key, kw))
+        if boom:
+            raise RuntimeError("the scout died")
+        return [result or CodeResult(
+            key=entries[0].key, status="found",
+            code_url="https://github.com/found/here", official=True,
+            message="found https://github.com/found/here")]
+
+    monkeypatch.setattr("lit.tui.find_code", fake)
+
+
+async def test_finding_code_runs_the_same_action_the_cli_does(app, stocked,
+                                                             monkeypatch):
+    """`C` is `lit code <key>` — the browser adds no second path to a link."""
+    calls: list = []
+    _stub_find(monkeypatch, calls)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.start_find_code(stocked.get("doe2010obscure"))
+        assert app.finding == {"doe2010obscure"}
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.finding == set()
+
+    assert calls[0][0] == "doe2010obscure"
+
+
+async def test_pressing_C_then_confirming_searches_for_the_code(app, stocked,
+                                                                monkeypatch):
+    calls: list = []
+    _stub_find(monkeypatch, calls)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_cycle_filter()
+        app.action_cycle_filter()  # -> unread: the entry with no code link
+        await pilot.pause()
+
+        await pilot.press("C")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmFindCode)
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    assert calls[0][0] == "doe2010obscure"
+
+
+async def test_finding_code_asks_before_spending_an_agent(app, monkeypatch):
+    monkeypatch.setattr("lit.tui.find_code",
+                        lambda *a, **k: pytest.fail("searched without confirming"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_find_code()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmFindCode)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.finding == set()
+
+
+async def test_a_failed_search_is_reported_and_does_not_take_the_browser_down(
+        app, stocked, monkeypatch):
+    _stub_find(monkeypatch, [], boom=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.start_find_code(stocked.get("doe2010obscure"))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.finding == set()
+        assert app.is_running
+
+
+async def test_the_browser_re_searches_a_link_the_user_was_warned_about(
+        app, stocked, monkeypatch):
+    """The prompt shows the existing link, so confirming means replace it."""
+    calls: list = []
+    _stub_find(monkeypatch, calls)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.start_find_code(stocked.get("vaswani2017attention"))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    assert calls[0][1]["force"] is True
+
+
+def test_the_find_code_prompt_warns_that_an_existing_link_is_replaced(stocked):
+    with_link = ConfirmFindCode(stocked.get("vaswani2017attention")).body_text()
+    assert "tensor2tensor" in with_link
+    assert "replaces it" in with_link
+
+    without = ConfirmFindCode(stocked.get("doe2010obscure")).body_text()
+    assert "replaces it" not in without
+
+
+async def test_a_paper_being_searched_shows_it(app, stocked):
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        entry = stocked.get("doe2010obscure")
+        app.finding.add(entry.key)
+        assert app.row_status(entry) == "code…"
+        assert entry.key in app.busy
+
+
+async def test_an_entry_being_searched_is_not_deleted_underneath_the_scout(
+        app, stocked):
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.finding.add(app.current().key)
+        app.action_delete_entry()
+        await pilot.pause()
+        assert not isinstance(app.screen, ConfirmDelete)
+        assert len(stocked) == 2
+
+
+# --------------------------------------------------------------------------
+# Where a code link came from
+# --------------------------------------------------------------------------
+
+async def test_the_detail_says_a_link_came_from_the_paper(app, stocked):
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        md = app.detail_markdown(stocked.get("vaswani2017attention"))
+    assert "tensor2tensor" in md
+    assert "printed in the paper" in md
+
+
+async def test_the_detail_marks_a_link_found_by_searching(app, stocked):
+    """A repository a scout found must never read as one the authors printed."""
+    stocked.save_entry(make_entry(
+        code_url="https://github.com/found/here", code_source=CODE_FROM_WEB,
+        code_reason="author release, high confidence — the README cites it"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        md = app.detail_markdown(stocked.get("vaswani2017attention"))
+    assert "found on the web" in md
+    assert "printed in the paper" not in md
+    assert "the README cites it" in md

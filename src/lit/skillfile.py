@@ -61,10 +61,12 @@ Two fields worth knowing about on every entry:
   summary anybody wrote and never evidence that the paper was read; quote it as
   the authors' own framing, nothing more. `lit refresh` backfills it if blank.
 - `code_url` — the code or artifact repository (GitHub, Hugging Face, Zenodo,
-  …), recorded only when the paper's own text printed it. Offer it when the user
-  asks whether a paper has code or wants to reproduce it. A null here means the
-  paper gave no link — it does not mean no code exists, so say it that way, and
-  never substitute a repository you happen to know of.
+  …). Offer it when the user asks whether a paper has code or wants to reproduce
+  it. `code_source` says where it came from and you must repeat that when you
+  quote the link: `paper` (or null, on older entries) means the paper's own text
+  printed it; `web` means `lit code` found it by searching, and `code_reason`
+  holds the evidence. A null `code_url` means nobody has found a link yet — run
+  `lit code <key>` rather than substituting a repository you happen to know of.
 
 `lit search` works from stored summaries — it is fast and cheap. Use it to find
 out **which** papers are relevant.
@@ -125,6 +127,24 @@ lit read --all --level A -n 5 --json         # or work through the backlog
   have `partial_read: true` and a `coverage` string like `10 of 412 pages
   (sampled)`. Say so when you cite one, and never imply its summary covers the
   whole work. `lit config set fetch.max_read_pages <n>` raises the budget.
+
+## Finding a paper's code
+
+```bash
+lit code <key> --json                    # search the web for its repository
+lit code --all --level A -n 10 --json    # the backlog, best papers first
+lit code <key> --dry-run --json          # report without storing
+```
+
+One cheap agent per paper, with web search. It only records a repository whose
+page names *this* paper, and only after checking the URL resolves, so a `null`
+result means it genuinely could not confirm one — do not fill that gap from your
+own knowledge. A third-party reimplementation is refused unless `--unofficial`
+is passed. Entries that already have a link are skipped; `--force` re-searches.
+
+Use it when the user asks whether a paper has code, wants to reproduce a result,
+or is looking for an implementation. Cite what it stores as web-found, not as
+the paper's own — see `code_source` above.
 
 ## Keeping a library current
 

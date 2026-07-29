@@ -8,8 +8,10 @@ The spec is strict about this path, and so is the code:
   step working off notes.
 * A paper that cannot be retrieved is stored anyway, flagged UNVERIFIED, with
   its summaries left blank. Nothing is inferred from the abstract.
-* A code link is recorded only when the paper's own text prints it. A model's
-  recollection of where a project lives is not evidence.
+* A code link is recorded here only when the paper's own text prints it. A
+  model's recollection of where a project lives is not evidence. Searching the
+  web for one is a separate, opt-in step (`lit code`), and what it finds is
+  stored marked as such.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from ..fetch.fulltext import fetch_fulltext, truncate_for_llm
 from ..fetch.metadata import PaperMeta, resolve_metadata, synth_bibtex
 from ..llm import LLMError
 from ..models import (
+    CODE_FROM_PAPER,
     ENTRY_TYPES,
     STATUS_UNREAD,
     STATUS_UNVERIFIED,
@@ -251,6 +254,7 @@ def add_paper(
         )
 
     _apply_reading(entry, data, meta, verdict, extra_tags, text)
+    _carry_code(entry, existing)
     entry.status = STATUS_VERIFIED
     entry.read_source = ft.source
     entry.pdf_path = _rel(ft.pdf_path, lib.path)
@@ -321,7 +325,7 @@ def _carry_reading(entry: Entry, existing: Entry) -> None:
     entry.sections = list(existing.sections)
     entry.key_findings = list(existing.key_findings)
     entry.tags = _norm_tags(list(existing.tags) + list(entry.tags))
-    entry.code_url = existing.code_url or entry.code_url
+    _carry_code(entry, existing)
     entry.read_source = existing.read_source
     entry.pdf_path = existing.pdf_path
     entry.text_chars = existing.text_chars
@@ -329,6 +333,21 @@ def _carry_reading(entry: Entry, existing: Entry) -> None:
     entry.pages_read = existing.pages_read
     if existing.venue and not entry.venue:
         entry.venue = existing.venue
+
+
+def _carry_code(entry: Entry, existing: Entry | None) -> None:
+    """Keep a code link this pass could not find for itself.
+
+    `lit code` records a repository the paper's own text never printed, so a
+    re-read — which only ever takes what it can see in the text — would drop
+    something already paid for. A link the paper prints is the stronger evidence
+    and always wins; this only fills a gap.
+    """
+    if existing is None or not existing.code_url or entry.code_url:
+        return
+    entry.code_url = existing.code_url
+    entry.code_source = existing.code_source
+    entry.code_reason = existing.code_reason
 
 
 def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
@@ -371,6 +390,11 @@ def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
             entry.bibtex = synth_bibtex(regenerated)
 
     entry.code_url = _code_url_from_reading(data.get("code_url"), text)
+    # Only stamped when the paper itself printed the link. A read that finds
+    # none must also clear a stale provenance, or a re-read of a paper whose
+    # repository was found by `lit code` would leave the note without the URL.
+    entry.code_source = CODE_FROM_PAPER if entry.code_url else None
+    entry.code_reason = ""
 
     if verdict.needs_judgement:
         lvl = str(data.get("level") or "").strip()

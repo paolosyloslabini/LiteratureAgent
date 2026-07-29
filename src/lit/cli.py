@@ -28,6 +28,7 @@ from .actions.add import (
 )
 from .actions.ask import ask as ask_action
 from .actions.claim import trace_claim
+from .actions.code import find_code
 from .actions.context import Ctx
 from .actions.discover import add_candidates, discover
 from .actions.inbox import process_inbox
@@ -710,6 +711,101 @@ def cmd_refresh(
                       "To re-read a paper, use `lit reread <key>`.[/dim]")
 
 
+@app.command("code")
+def cmd_code(
+    keys: list[str] = typer.Argument(
+        None, help="Entry keys to search for. Omit and use --all for the backlog."),
+    all_entries: bool = typer.Option(
+        False, "--all", help="Search for every entry that has no code link yet."),
+    limit: int = typer.Option(
+        0, "-n", "--limit", help="With --all, stop after this many (best levels first)."),
+    level: Optional[str] = typer.Option(
+        None, "--level", help="With --all, only entries at this level or better."),
+    tag: Optional[str] = typer.Option(
+        None, "--tag", help="With --all, only entries carrying this tag."),
+    force: bool = typer.Option(
+        False, "--force", help="Re-search entries that already have a code link."),
+    unofficial: bool = typer.Option(
+        False, "--unofficial", help="Accept a third-party reimplementation when "
+                                    "the authors released nothing."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what was found without storing it."),
+):
+    """Search the web for the repository that implements a paper.
+
+    One cheap agent per paper, with web search. `lit add` records a code link
+    only when the paper's own text prints one; this goes looking for the rest.
+    What it finds is stored marked as web-found, never as the paper's own.
+    """
+    ctx = _ctx()
+    try:
+        lib = ctx.library
+        wanted: list[Entry] = []
+        missing: list[str] = []
+        if keys:
+            for k in keys:
+                entry = lib.get(k)
+                if entry is None:
+                    missing.append(k)
+                else:
+                    wanted.append(entry)
+        elif all_entries:
+            wanted = [e for e in lib.entries() if force or not e.code_url]
+            if level:
+                wanted = [e for e in wanted if level_rank(e.level) <= level_rank(level)]
+            if tag:
+                t = tag.strip().lower()
+                wanted = [e for e in wanted if t in [x.lower() for x in e.tags]]
+            # Best-ranked first, so a truncated run searches the papers that matter.
+            wanted.sort(key=lambda e: (level_rank(e.level), -(e.citation_count or 0)))
+            if limit > 0:
+                wanted = wanted[:limit]
+        else:
+            _fail("give one or more entry keys, or --all to work through the "
+                  "entries that have no code link.")
+
+        if missing:
+            _fail(f"no entry with key(s): {', '.join(missing)}")
+        if not wanted:
+            msg = "Nothing to search — every entry already has a code link."
+            if state.json_mode:
+                _emit({"code": [], "message": msg})
+            else:
+                console.print(f"[dim]{msg}[/dim]")
+            return
+
+        results = find_code(ctx, wanted, force=force, unofficial=unofficial,
+                            dry_run=dry_run)
+    finally:
+        ctx.close()
+
+    if state.json_mode:
+        _emit({"code": [r.to_dict() for r in results], "usage": ctx.usage.summary()})
+        return
+
+    found = [r for r in results if r.status == "found"]
+    console.print(
+        f"\n[bold]{len(found)}[/bold] of {len(results)} paper(s) got a code link"
+        + (" [dim](dry run — nothing stored)[/dim]" if dry_run and found else "")
+    )
+    for r in results:
+        if r.status in ("found", "unchanged"):
+            console.print(
+                f"[green]{r.key}[/green]: {r.code_url}"
+                + ("" if r.official else " [yellow](third-party)[/yellow]")
+            )
+            if r.evidence:
+                console.print(f"  [dim]{r.evidence[:200]}[/dim]")
+        elif r.status == "none":
+            console.print(f"[dim]{r.key}: no public repository found[/dim]")
+        elif r.status == "skipped":
+            console.print(f"[dim]{r.key}: {r.message}[/dim]")
+        else:
+            console.print(f"[yellow]{r.key}:[/yellow] {r.message}")
+    if footer := _usage_footer(ctx):
+        console.print(f"[dim]{footer}[/dim]")
+
+
 @app.command("inbox")
 def cmd_inbox(
     keep: bool = typer.Option(False, "--keep", help="Leave the PDFs in the inbox."),
@@ -1279,7 +1375,8 @@ def _entry_json(e: Entry, full: bool = False) -> dict:
     data = {
         "key": e.key, "title": e.title, "authors": e.authors, "year": e.year,
         "venue": e.venue, "type": e.type, "doi": e.doi, "arxiv_id": e.arxiv_id,
-        "url": e.url, "code_url": e.code_url, "status": e.status, "level": e.level,
+        "url": e.url, "code_url": e.code_url, "code_source": e.code_source,
+        "code_reason": e.code_reason, "status": e.status, "level": e.level,
         "level_reason": e.level_reason, "one_liner": e.one_liner, "tags": e.tags,
         "citation_count": e.citation_count, "citation": e.citation(),
         "key_findings": e.key_findings, "notes": e.notes,
