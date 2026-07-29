@@ -634,17 +634,28 @@ def _entry_card(e: Entry, *, brief: bool = False) -> str:
     limit = 3 if brief else 5
     findings = "\n".join(f"    - {_snippet(f, 160) if brief else f}"
                          for f in e.key_findings[:limit])
+    # Sections are the cheapest signal on the card and by far the most
+    # expensive: unabridged they are ~70% of a saturated card, yet they are
+    # indexed at the lowest bm25 weight (see _BM25_WEIGHTS) precisely because
+    # they restate what the one-liner and key findings already say. Four
+    # openers are enough to show what the paper covers; a ranker deciding
+    # relevance from thirty of these does not need the sixth subsection too.
     sections = "" if brief else "\n".join(
-        f"    {s.name}: {s.summary[:300]}" for s in e.sections[:12]
+        f"    {s.name}: {s.summary[:150]}" for s in e.sections[:4]
     )
     # An entry filed but not yet read has no agent-written summary, only the
     # publisher's abstract. Showing that is what keeps it visible here: it was
     # added because it matched a query, and it should not be unfindable until
-    # someone pays to read it.
+    # someone pays to read it. The cap is generous because FTS indexes the
+    # whole abstract: a shorter one would let an entry be retrieved on a term
+    # the ranker then cannot see, and be dropped for "merely sharing
+    # vocabulary". 1500 covers all but the longest abstracts, and unread
+    # entries carry no sections or findings, so their cards stay small anyway.
+    # A brief card is not ranking on this evidence and keeps its opener only.
     stand_in = ""
     if not e.one_liner and e.abstract.strip():
         stand_in = ("  Abstract (not yet read): "
-                    f"{_snippet(e.abstract, 240 if brief else 600)}")
+                    f"{_snippet(e.abstract, 240 if brief else 1500)}")
     return "\n".join(filter(None, [
         f"[{e.key}] {e.title} — {e.citation()} (level {e.level}, {e.type})",
         f"  One-liner: {e.one_liner or '(none — not read yet)'}",
