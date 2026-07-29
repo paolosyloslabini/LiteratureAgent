@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from lit.actions.inbox import _guess_title, normalize_arxiv_from_header
+from pathlib import Path
+
+from lit.actions.inbox import (
+    InboxItem,
+    _guess_title,
+    _match_entry,
+    normalize_arxiv_from_header,
+)
 from lit.fetch.fulltext import (
     MIN_USABLE_CHARS,
     _html_candidates,
@@ -22,7 +29,9 @@ from lit.fetch.metadata import (
     synth_bibtex,
 )
 
-from factories import make_meta
+from lit.models import STATUS_UNVERIFIED
+
+from factories import make_entry, make_meta
 
 
 # --------------------------------------------------------------------------
@@ -247,6 +256,37 @@ def test_guess_title_skips_boilerplate():
 
 def test_guess_title_returns_none_for_junk():
     assert _guess_title("1\n2\n3\n") is None
+
+
+def _unverified(lib):
+    return [e for e in lib.iter_entries() if not e.is_verified]
+
+
+def test_a_title_that_merely_contains_another_does_not_match(lib):
+    # A dropped PDF used to claim any entry whose title was a substring of its
+    # own — so "Deep Learning" was filled in with a paper about symbolic maths.
+    lib.save_entry(make_entry(key="lecun2015deep", title="Deep Learning",
+                              arxiv_id=None, status=STATUS_UNVERIFIED))
+    item = InboxItem(path=Path("deep-learning-for-symbolic-mathematics.pdf"),
+                     title_guess="Deep Learning for Symbolic Mathematics")
+    assert _match_entry(item, _unverified(lib), lib) is None
+
+
+def test_a_title_contained_by_another_does_not_match_either(lib):
+    # The mirror image: a short PDF title must not claim a longer entry.
+    lib.save_entry(make_entry(key="lample2020deep", arxiv_id=None,
+                              title="Deep Learning for Symbolic Mathematics",
+                              status=STATUS_UNVERIFIED))
+    item = InboxItem(path=Path("deep-learning.pdf"), title_guess="Deep Learning")
+    assert _match_entry(item, _unverified(lib), lib) is None
+
+
+def test_a_title_differing_only_in_case_and_punctuation_still_matches(lib):
+    # Slugging is what the tolerance buys: case, punctuation and spacing go.
+    lib.save_entry(make_entry(arxiv_id=None, status=STATUS_UNVERIFIED))
+    item = InboxItem(path=Path("attn.pdf"), title_guess="ATTENTION IS ALL YOU NEED!")
+    match = _match_entry(item, _unverified(lib), lib)
+    assert match is not None and match.key == "vaswani2017attention"
 
 
 # --------------------------------------------------------------------------
