@@ -140,14 +140,30 @@ expensive work starts, so two agents never read the same paper:
 
 1. **Reference mining** — free and hallucination-proof. Works cited by several
    papers already in your library, but missing from it, are exactly the gaps
-   worth filling. One cheap call filters them for relevance.
+   worth filling.
 2. **Scout agents** search the web in parallel, each on a different angle
    (foundational / recent / surveys & benchmarks / adjacent fields / critical
    work). Each is handed the titles you already have, plus what mining just
    surfaced, and told not to propose them.
 
-Candidates found by more than one source rank highest. Only then does the read
-fan-out begin, one agent per paper.
+The pool is then ranked on **relevance** to what you asked (65%) and
+**importance** (35%), and cut to `-n`:
+
+- *Relevance* is one cheap call scoring the whole pool at once. Every candidate
+  is scored the same way whatever found it — a scout works from an angle, not
+  from your query, so its proposals need checking just as much as a mined
+  reference does. Anything scoring below 0.35 is dropped outright, so a famous
+  paper that does not answer the question cannot take a slot on reputation.
+- *Importance* is computed, not judged: citation velocity and venue rank (the
+  same metrics behind the levels below), from one free OpenAlex lookup per
+  candidate made **before** the cut. Papers from the last two years are scored
+  on venue alone, so new work is not buried for having had no time to
+  accumulate citations, and a paper nothing is known about is treated as
+  middling rather than worthless. Co-citation in your library and agreement
+  between scout angles contribute the remaining weight.
+
+`lit find` prints both numbers per candidate, so you can see why the cut fell
+where it did. Only then does the read fan-out begin, one agent per paper.
 
 ### Levels come from metrics, not vibes
 
@@ -205,7 +221,8 @@ timeout_s = 900
 
 [llm.models]            # cheap steps run cheap
 scout = "haiku"         # web search for candidates
-filter = "haiku"        # ranking candidates and library hits
+filter = "haiku"        # filtering library hits
+rank = "haiku"          # scoring candidates for relevance to the query
 reader = "sonnet"       # reading a full paper — the quality step
 analyst = "sonnet"      # extracting quoted evidence, tracing claims
 synthesis = "sonnet"    # writing the final cited answer

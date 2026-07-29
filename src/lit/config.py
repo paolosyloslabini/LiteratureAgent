@@ -51,13 +51,15 @@ CONFIG_PATH = _LazyPath()
 # a cheap model and only the steps that need real comprehension pay for it.
 #
 #   scout     — web search for candidate papers (many calls, shallow judgement)
-#   filter    — ranking/filtering candidates and library hits by title/summary
+#   filter    — filtering library hits by title/summary
+#   rank      — scoring a pool of candidate papers for relevance to a query
 #   reader    — reading a full paper and writing its summaries (the quality step)
 #   analyst   — extracting quoted evidence, tracing a claim through a paper
 #   synthesis — writing the final cited answer
 DEFAULT_ROLE_MODELS: dict[str, str] = {
     "scout": "haiku",
     "filter": "haiku",
+    "rank": "haiku",
     "reader": "sonnet",
     "analyst": "sonnet",
     "synthesis": "sonnet",
