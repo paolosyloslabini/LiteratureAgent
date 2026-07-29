@@ -47,7 +47,7 @@ Or in a plain virtualenv, without putting `lit` on your PATH:
 
 ```bash
 uv venv && uv pip install -e ".[dev]"
-.venv/bin/python -m pytest            # 345 tests, no network, no API calls
+.venv/bin/python -m pytest            # 577 tests, no network, no API calls
 .venv/bin/lit --help
 ```
 
@@ -65,6 +65,7 @@ lit find "benchmarks for scientific discovery since 2023" -n 10  # files them, r
 lit read --all --level A         # read the good ones, when you want them read
 lit find "..." --parallel        # add LLM scouts to the free index search
 
+lit code --all -n 5                          # go find the code for them
 lit search "causal discovery"                # which of my papers cover this?
 lit ask "What are the current capabilities?"  # read them and answer, with quotes
 lit claim "transformers scale better than LSTMs"   # trace it to its origin
@@ -85,6 +86,7 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit ls` / `show` / `note` | browse and annotate |
 | `lit delete` | remove entries, their PDFs and their cached text (`lit rm`) |
 | `lit abstract` | print an entry's abstract, ready to pipe |
+| `lit code` | search the web for the repository that implements a paper |
 | `lit search` | find in-library sources (fast, from summaries) |
 | `lit ask` | answer a question by reading the actual papers |
 | `lit claim` | trace a claim back to the paper that originates it |
@@ -158,6 +160,36 @@ against the very text the model was given, compared loosely enough to survive a
 PDF snapping the URL across two lines. A bare `github.com/some-org` with no
 project on it is rejected too. No link recorded means the paper printed none;
 it does not mean there is no code.
+
+Plenty of papers release code without printing the URL, or release it after
+publication. `lit code` goes looking:
+
+```bash
+lit code vaswani2017attention        # one paper
+lit code --all --level A -n 10       # the backlog, best papers first
+lit code <key> --dry-run             # see what it found, store nothing
+```
+
+One cheap agent per paper (haiku by default), with web search. It works from
+pages rather than recall: it opens the candidate repository, and records it only
+if the repository names *this* paper — its title, arXiv id, DOI or a BibTeX
+block citing it — quoting the line that proves it. Then `lit` checks the URL
+resolves, because the invented ones 404. A repository the authors did not
+release is refused unless you pass `--unofficial`; being unable to answer at all
+is a normal outcome and costs one cheap call.
+
+What it finds is stored marked `code_source: web`, alongside the evidence, and
+every place that displays a link says which kind it is:
+
+```
+Code: https://github.com/tensorflow/tensor2tensor (printed in the paper)
+Code: https://github.com/some/repo (found on the web)
+author release, high confidence — the README cites the paper's arXiv id
+```
+
+A searched-for repository is a weaker claim than one the authors printed, and
+the two are never shown as the same thing. Re-reading a paper keeps a
+searched-for link, and replaces it if the text turns out to print one.
 
 A library outlives the day it was built, so `lit refresh` re-fetches citation
 counts, reference lists and venues for entries you already have — and picks up
@@ -306,17 +338,24 @@ way to work through a backlog.
 | `^d` `^u` | scroll the record (or `tab` into it, or use the wheel) |
 | `R` | read this paper — `lit read <key>`, after a confirmation |
 | `o` / `c` | open the paper / its code repository in a browser |
+| `C` | find this paper's code — `lit code <key>`, after a confirmation |
 | `n` | edit your notes (saved exactly as `lit note` saves them) |
 | `d` | delete this entry — `lit delete <key>`, after a confirmation |
 | `/` `f` `s` `r` | search · filter · sort · reload |
 
 A read started with `R` runs in the background: the browser stays usable, the
 row shows `reading…`, and the cost lands in a notification when it finishes.
+`C` works the same way, showing `code…`, and reports the repository it found —
+or that this paper has none to find. When the entry already links one, the
+confirmation says which link is about to be replaced.
+
+The record below names the provenance of every code link it shows, so a
+repository `C` found on the web never reads as one the authors printed.
 
 `d` deletes the same things `lit delete` does, and cannot be undone, so it asks
 first — saying so out loud when the entry carries notes you wrote. It declines
-while a read is still running, and leaves the cursor where the row was so you
-can work down a backlog without scrolling back each time.
+while an agent is still working on that entry, and leaves the cursor where the
+row was so you can work down a backlog without scrolling back each time.
 
 Links open in the browser you actually look at. Under WSL that means the
 Windows side — Chrome if it is installed, otherwise the Windows default
@@ -356,6 +395,7 @@ find_read_chars = 150_000   # tighter budget for `lit find --read`, a whole batc
 [llm.models]            # cheap steps run cheap
 plan = "haiku"          # reading your query into index search parameters
 scout = "haiku"         # web search for candidates
+code = "haiku"          # web search for a paper's implementation
 filter = "haiku"        # filtering library hits
 rank = "haiku"          # scoring candidates for relevance to the query
 reader = "sonnet"       # reading a full paper — the quality step

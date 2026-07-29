@@ -79,6 +79,17 @@ def test_effort_defaults():
     assert cfg.llm.efforts == DEFAULT_ROLE_EFFORT
 
 
+def test_every_role_names_its_own_effort():
+    """A role in one map and not the other silently inherits the fallback.
+
+    That is precisely the un-chosen effort this setting exists to abolish, and
+    it is invisible at runtime — the call still works, it just costs more. So
+    the two maps are pinned to each other rather than left to be remembered
+    whenever a new role is added.
+    """
+    assert set(DEFAULT_ROLE_EFFORT) == set(DEFAULT_ROLE_MODELS)
+
+
 def test_partial_effort_overrides_keep_the_other_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("LIT_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.toml").write_bytes(

@@ -44,7 +44,7 @@ NOTES_BANNER = (
 # Frontmatter key order; anything not listed is appended alphabetically.
 _FM_ORDER = [
     "key", "title", "authors", "year", "venue", "type",
-    "doi", "arxiv_id", "url", "code_url",
+    "doi", "arxiv_id", "url", "code_url", "code_source", "code_reason",
     "status", "level", "level_reason",
     "tags", "citation_count",
     "read_source", "pdf_path", "text_chars", "pages", "pages_read",
@@ -132,7 +132,8 @@ def loads(text: str) -> Entry:
         key=str(data.get("key") or ""),
         title=str(data.get("title") or ""),
     )
-    for f in ("venue", "doi", "arxiv_id", "url", "code_url", "level_reason",
+    for f in ("venue", "doi", "arxiv_id", "url", "code_url", "code_source",
+              "code_reason", "level_reason",
               "read_source", "pdf_path", "bibtex", "added", "updated", "status",
               "level", "type"):
         if data.get(f) is not None:

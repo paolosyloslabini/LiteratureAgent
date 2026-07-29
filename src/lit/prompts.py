@@ -35,6 +35,14 @@ SCOUT_SYSTEM = (
     "an id you are not sure about must be left null rather than guessed."
 )
 
+CODE_SCOUT_SYSTEM = (
+    "You are tracking down the implementation of one specific paper. You work "
+    "from pages you have actually opened, never from recollection: you do not "
+    "know where a project lives until you have seen its repository and found "
+    "the paper named on it. A repository you cannot confirm is one you did not "
+    "find, and you say so plainly rather than offering the most likely URL."
+)
+
 PLANNER_SYSTEM = (
     "You are a reference librarian taking a request at the desk and writing "
     "down what to type into the catalogue. You restate what you were asked in "
@@ -632,6 +640,80 @@ def find_claim_source_prompt(*, claim: str, scope: str) -> str:
     ])
 
 
+def find_code_prompt(*, title: str, authors: list[str], year: int | None,
+                     doi: str | None, arxiv_id: str | None,
+                     venue: str | None = "", abstract: str = "") -> str:
+    """Ask a cheap agent to find the implementation of one specific paper.
+
+    The whole risk here is a plausible URL. Asked where a paper's code lives, a
+    model will happily produce `github.com/<lab>/<method-name>` — the right lab,
+    a repository that never existed. So the prompt is built around evidence
+    rather than recall: open the page, find this paper named on it, quote the
+    line that names it, and answer null when there is nothing to quote.
+    """
+    who = ", ".join(authors[:6]) + (" et al." if len(authors) > 6 else "")
+    ident = " · ".join(filter(None, [
+        f"DOI {doi}" if doi else "",
+        f"arXiv:{arxiv_id}" if arxiv_id else "",
+        venue or "",
+        str(year) if year else "",
+    ]))
+
+    schema = {
+        "repo_url": "string|null — the repository's URL, exactly as it appears "
+                    "in the address bar of the page you opened. null if you did "
+                    "not confirm one.",
+        "official": "boolean — true only if the authors or their lab released "
+                    "it, or the paper's own page links to it. false for a "
+                    "third-party reimplementation.",
+        "evidence": "string — the sentence or line you saw that ties this "
+                    "repository to THIS paper, quoted from the page. Say where "
+                    "you saw it (repo README, arXiv page, project site).",
+        "confidence": "string — high, medium or low",
+        "searched": ["string — a query or URL you actually tried, so a failed "
+                     "search says what was already ruled out"],
+    }
+
+    return "\n".join(filter(None, [
+        "Find the code repository for this specific paper:",
+        f"  Title:   {title!r}",
+        f"  Authors: {who}" if who else "",
+        f"  Ident:   {ident}" if ident else "",
+        f"  Abstract: {_snippet(abstract, 400)}" if abstract.strip() else "",
+        "",
+        "Where to look, in order:",
+        "- The paper's own landing page — an arXiv abstract page links code "
+        "under 'Code, Data and Media'; a publisher page has an artifact or "
+        "supplementary link.",
+        "- Papers With Code / Hugging Face Papers for this exact title.",
+        "- A web search for the title together with the method's name and "
+        "'github'.",
+        "- The GitHub organization or personal account of the authors' lab, "
+        "when you already know from a page you opened which one that is.",
+        "",
+        "Rules — these decide whether the answer is usable:",
+        "- OPEN the candidate repository and read it. A search result snippet "
+        "is not confirmation, and a URL you have not opened does not count.",
+        "- The repository must name THIS paper: its title, its arXiv id or "
+        "DOI, its authors, or a BibTeX block citing it. A repository that "
+        "merely works on the same topic is the wrong answer.",
+        "- Quote the line that proves it in `evidence`. If you cannot quote "
+        "one, `repo_url` is null.",
+        "- Never construct a URL from the method's name, the lab's name or the "
+        "first author's name. Every character must come from a page you opened.",
+        "- If the page 404s or will not load, that is not a repository you "
+        "found. Do not report it.",
+        "- One paper can have no public code at all. Answering null is a "
+        "correct, useful answer — a wrong link costs more than a missing one.",
+        "- Prefer the repository the authors released. Report a third-party "
+        "reimplementation only when there is no official one, and set "
+        "`official` to false for it.",
+        "",
+        "Reply with a single JSON object, no markdown fence, matching this shape:",
+        json.dumps(schema, indent=2),
+    ]))
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
@@ -659,17 +741,28 @@ def _entry_card(e: Entry, *, brief: bool = False) -> str:
     limit = 3 if brief else 5
     findings = "\n".join(f"    - {_snippet(f, 160) if brief else f}"
                          for f in e.key_findings[:limit])
+    # Sections are the cheapest signal on the card and by far the most
+    # expensive: unabridged they are ~70% of a saturated card, yet they are
+    # indexed at the lowest bm25 weight (see _BM25_WEIGHTS) precisely because
+    # they restate what the one-liner and key findings already say. Four
+    # openers are enough to show what the paper covers; a ranker deciding
+    # relevance from thirty of these does not need the sixth subsection too.
     sections = "" if brief else "\n".join(
-        f"    {s.name}: {s.summary[:300]}" for s in e.sections[:12]
+        f"    {s.name}: {s.summary[:150]}" for s in e.sections[:4]
     )
     # An entry filed but not yet read has no agent-written summary, only the
     # publisher's abstract. Showing that is what keeps it visible here: it was
     # added because it matched a query, and it should not be unfindable until
-    # someone pays to read it.
+    # someone pays to read it. The cap is generous because FTS indexes the
+    # whole abstract: a shorter one would let an entry be retrieved on a term
+    # the ranker then cannot see, and be dropped for "merely sharing
+    # vocabulary". 1500 covers all but the longest abstracts, and unread
+    # entries carry no sections or findings, so their cards stay small anyway.
+    # A brief card is not ranking on this evidence and keeps its opener only.
     stand_in = ""
     if not e.one_liner and e.abstract.strip():
         stand_in = ("  Abstract (not yet read): "
-                    f"{_snippet(e.abstract, 240 if brief else 600)}")
+                    f"{_snippet(e.abstract, 240 if brief else 1500)}")
     return "\n".join(filter(None, [
         f"[{e.key}] {e.title} — {e.citation()} (level {e.level}, {e.type})",
         f"  One-liner: {e.one_liner or '(none — not read yet)'}",

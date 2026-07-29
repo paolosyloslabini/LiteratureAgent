@@ -38,6 +38,16 @@ def test_terms_are_deduplicated():
     assert q.count('"attention"') == 1
 
 
+def test_ordinary_words_that_carry_technical_meaning_are_kept():
+    """A stopword is deleted, not down-weighted, so it must be truly contentless.
+
+    'state' and 'current' read as filler in a question and as the subject in a
+    query; listing them made "state space model" unsearchable.
+    """
+    assert to_fts_query("state space models") == '"state" OR "space" OR "models"'
+    assert '"state"' in to_fts_query("current state of causal inference")
+
+
 # --------------------------------------------------------------------------
 # Indexing and search
 # --------------------------------------------------------------------------

@@ -52,6 +52,7 @@ CONFIG_PATH = _LazyPath()
 #
 #   plan      — reading a plain-language query into index search parameters
 #   scout     — web search for candidate papers (many calls, shallow judgement)
+#   code      — web search for a paper's implementation (one search, one check)
 #   filter    — filtering library hits by title/summary
 #   rank      — scoring a pool of candidate papers for relevance to a query
 #   reader    — reading a full paper and writing its summaries (the quality step)
@@ -60,6 +61,7 @@ CONFIG_PATH = _LazyPath()
 DEFAULT_ROLE_MODELS: dict[str, str] = {
     "plan": "haiku",
     "scout": "haiku",
+    "code": "haiku",
     "filter": "haiku",
     "rank": "haiku",
     "reader": "sonnet",
@@ -80,6 +82,7 @@ DEFAULT_ROLE_MODELS: dict[str, str] = {
 DEFAULT_ROLE_EFFORT: dict[str, str] = {
     "plan": "low",       # extracting search parameters from one sentence
     "scout": "low",      # many shallow calls
+    "code": "low",       # open a repository page and say whether it cites the paper
     "filter": "low",
     "rank": "low",
     "reader": "medium",  # the quality step, but still comprehension not reasoning
