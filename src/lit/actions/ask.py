@@ -225,17 +225,33 @@ def ask(
         else:
             entry: Entry = r.item  # type: ignore[assignment]
             result.evidence.append(
-                Evidence(entry=entry, relevant=False, error=str(r.error))
+                Evidence(entry=entry, relevant=False,
+                         error=str(r.error) or type(r.error).__name__)
             )
             result.unreadable.append(entry.key)
 
     # ---- 4. synthesize ---------------------------------------------------
     usable = result.cited
     if not usable:
-        result.answer = (
-            "None of the papers read contained evidence bearing on that question. "
-            "Sources consulted: " + ", ".join(result.consulted) + "."
-        )
+        # Three different things land here and they are not the same news:
+        # nothing could be read, everything was read and held nothing, or some
+        # of each. Only the last two say anything about the library, and a run
+        # where every fetch or LLM call failed must not be reported as one.
+        # The per-paper reason is on each `Evidence.error`; the caller prints it.
+        read_ok = [k for k in result.consulted if k not in result.unreadable]
+        failed = ", ".join(result.unreadable)
+        if not read_ok:
+            result.answer = (
+                "None of the sources consulted could be read, so this is not an "
+                f"answer about what the library contains. Could not read: {failed}."
+            )
+        else:
+            result.answer = (
+                "None of the papers read contained evidence bearing on that "
+                "question. Sources read: " + ", ".join(read_ok) + "."
+                + (f" {len(result.unreadable)} could not be read: {failed}."
+                   if result.unreadable else "")
+            )
         return result
 
     ctx.log("[bold]Synthesizing[/bold] the answer…")
