@@ -158,10 +158,19 @@ class Library:
         return entryfile.save(self.entry_path(entry.key), entry)
 
     def delete_entry(self, key: str) -> bool:
+        """Remove an entry and everything downloaded to produce it.
+
+        The Markdown file is the entry; the PDF and the cached text are only
+        what was fetched to write it, so they go with it. The search index is a
+        derived cache and drops the row on its next sync. One path, so `lit
+        delete` and the browser cannot leave different debris behind.
+        """
         p = self.entry_path(key)
         if not p.exists():
             return False
         p.unlink()
+        (self.pdfs_dir / f"{key}.pdf").unlink(missing_ok=True)
+        (self.text_dir / f"{key}.txt").unlink(missing_ok=True)
         return True
 
     def unique_key(self, base: str) -> str:

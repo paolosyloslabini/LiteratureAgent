@@ -108,6 +108,48 @@ class ConfirmRead(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ConfirmDelete(ModalScreen[bool]):
+    """Deleting is the one thing in here that cannot be undone.
+
+    So it asks first, it says what goes with the entry, and — unlike the read
+    prompt — it does not accept `enter`, which is whatever the user was already
+    pressing to move around the list.
+    """
+
+    BINDINGS = [
+        Binding("y", "confirm", "Delete"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("n", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, entry: Entry):
+        super().__init__()
+        self.entry = entry
+
+    def body_text(self) -> str:
+        """What the prompt says. Pure, so it can be tested on its own."""
+        return (
+            f"{self.entry.title[:200]}\n\n"
+            f"[dim]{self.entry.citation()}[/dim]\n\n"
+            "Removes the record, its PDF and its cached text. This cannot "
+            "be undone."
+            + ("\n\n[bold yellow]Your notes on this entry go too.[/bold yellow]"
+               if self.entry.notes.strip() else "")
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box", classes="danger"):
+            yield Static("Delete this entry?", id="confirm-title", classes="danger")
+            yield Static(self.body_text(), id="confirm-body")
+            yield Static("[dim]y delete · esc cancel[/dim]", id="confirm-help")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class BrowserApp(App):
     """Two-pane browser: entry list on top, detail below."""
 
@@ -134,6 +176,9 @@ class BrowserApp(App):
     #confirm-title { padding: 0 1; background: $accent; color: $text; }
     #confirm-body { padding: 1; }
     #confirm-help { padding: 0 1; }
+    /* The destructive prompt should not look like the routine one. */
+    #confirm-box.danger { border: thick $error; }
+    #confirm-title.danger { background: $error; }
     """
 
     BINDINGS = [
@@ -142,6 +187,7 @@ class BrowserApp(App):
         Binding("escape", "clear_search", "Clear", show=False),
         Binding("R", "read_entry", "Read"),
         Binding("n", "edit_notes", "Notes"),
+        Binding("d", "delete_entry", "Delete"),
         Binding("o", "open_link", "Open"),
         Binding("c", "open_code", "Code"),
         Binding("f", "cycle_filter", "Filter"),
@@ -414,6 +460,38 @@ class BrowserApp(App):
             self.notify(f"opened in {how}: {url}")
         else:
             self.notify(f"could not open {url}", severity="error")
+
+    # ---------------- deleting ----------------
+
+    def action_delete_entry(self) -> None:
+        """Delete the selected entry — the browser's half of `lit delete <key>`."""
+        entry = self.current()
+        if entry is None:
+            return
+        if entry.key in self.reading:
+            self.notify(
+                f"{entry.key} is being read right now — let it finish first",
+                severity="warning",
+            )
+            return
+        self.push_screen(ConfirmDelete(entry), partial(self._delete_confirmed, entry))
+
+    def _delete_confirmed(self, entry: Entry, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        table = self.query_one("#table", DataTable)
+        # Where to land afterwards: the row that slides up into this one, so
+        # working down a backlog doesn't throw the cursor back to the top.
+        row = table.cursor_row if table.cursor_row is not None else 0
+        if self.library.delete_entry(entry.key):
+            self.notify(f"deleted {entry.key}")
+        else:
+            self.notify(f"{entry.key} was already gone", severity="warning")
+        self.action_reload()
+        if self.shown:
+            index = max(0, min(row, len(self.shown) - 1))
+            table.move_cursor(row=index)
+            self.show_detail(self.shown[index])
 
     # ---------------- reading ----------------
 

@@ -223,9 +223,44 @@ def test_cite_to_file(stocked, tmp_path):
     assert "@inproceedings" in out.read_text()
 
 
-def test_rm(stocked):
+def test_delete(stocked):
+    assert js(run("--json", "delete", "doe2010obscure", "-y"))["deleted"] == \
+        ["doe2010obscure"]
+    assert js(run("--json", "ls"))["count"] == 1
+
+
+def test_rm_is_still_an_alias_for_delete(stocked):
     assert run("--json", "rm", "doe2010obscure", "-y").exit_code == 0
     assert js(run("--json", "ls"))["count"] == 1
+
+
+def test_delete_takes_several_keys_at_once(stocked):
+    data = js(run("--json", "delete", "doe2010obscure", "vaswani2017attention", "-y"))
+    assert set(data["deleted"]) == {"doe2010obscure", "vaswani2017attention"}
+    assert js(run("--json", "ls"))["count"] == 0
+
+
+def test_delete_refuses_the_whole_batch_on_one_bad_key(stocked):
+    """A typo must not take the keys standing next to it in the batch."""
+    assert run("--json", "delete", "doe2010obscure", "ghost", "-y").exit_code != 0
+    assert js(run("--json", "ls"))["count"] == 2
+
+
+def test_delete_takes_the_pdf_and_cached_text_with_it(stocked):
+    pdf = stocked.pdfs_dir / "doe2010obscure.pdf"
+    text = stocked.text_dir / "doe2010obscure.txt"
+    pdf.write_bytes(b"%PDF-1.4")
+    text.write_text("full text", encoding="utf-8")
+
+    assert run("--json", "delete", "doe2010obscure", "-y").exit_code == 0
+    assert not pdf.exists()
+    assert not text.exists()
+
+
+def test_delete_asks_before_removing_anything(stocked):
+    """Answering no at the prompt leaves the library untouched."""
+    assert runner.invoke(app, ["delete", "doe2010obscure"], input="n\n").exit_code == 0
+    assert stocked.has("doe2010obscure")
 
 
 def test_reindex(stocked):
