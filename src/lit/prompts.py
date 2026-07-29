@@ -43,6 +43,15 @@ CODE_SCOUT_SYSTEM = (
     "find, and you say so plainly rather than offering the most likely URL."
 )
 
+CHECK_SYSTEM = (
+    "You are a bibliographic cataloguer checking one record against the "
+    "published source. You work from pages you have opened — a publisher's "
+    "landing page, DBLP, the ACL Anthology, the proceedings front matter — "
+    "never from recollection. You are asked about fields that already have a "
+    "value, so 'this one is correct' is a real and useful answer, and 'I could "
+    "not confirm either way' is better than a plausible replacement."
+)
+
 PLANNER_SYSTEM = (
     "You are a reference librarian taking a request at the desk and writing "
     "down what to type into the catalogue. You restate what you were asked in "
@@ -708,6 +717,93 @@ def find_code_prompt(*, title: str, authors: list[str], year: int | None,
         "- Prefer the repository the authors released. Report a third-party "
         "reimplementation only when there is no official one, and set "
         "`official` to false for it.",
+        "",
+        "Reply with a single JSON object, no markdown fence, matching this shape:",
+        json.dumps(schema, indent=2),
+    ]))
+
+
+def check_metadata_prompt(*, entry: Entry,
+                          suspicions: list[tuple[str, str]]) -> str:
+    """Ask a cheap agent to verify the fields an audit found implausible.
+
+    The risk here is the mirror image of `find_code_prompt`. Asked what venue a
+    paper appeared at, a model will name a conference that sounds right for the
+    topic and the year — and unlike an invented URL, an invented venue cannot be
+    checked by fetching it. So the prompt asks for the page the value was read
+    off, and `actions.check` discards every answer that arrives without one.
+
+    It is also told what the record already says. A cataloguer who does not know
+    the current value cannot tell us it is right, and "correct" is the answer
+    most worth being able to trust: it is what stops the same entry being
+    re-checked on every run.
+    """
+    suspect = "\n".join(f"  - {name}: {problem}" for name, problem in suspicions)
+    known = "\n".join(filter(None, [
+        f"  title:          {entry.title!r}",
+        f"  authors:        {', '.join(entry.authors[:8]) or '(none recorded)'}",
+        f"  year:           {entry.year or '(none recorded)'}",
+        f"  venue:          {entry.venue!r}" if entry.venue
+        else "  venue:          (none recorded)",
+        f"  type:           {entry.type!r}",
+        f"  doi:            {entry.doi}" if entry.doi else "",
+        f"  arxiv_id:       {entry.arxiv_id}" if entry.arxiv_id else "",
+        f"  citation_count: {entry.citation_count}"
+        if entry.citation_count is not None else "",
+    ]))
+
+    schema = {
+        "fields": [
+            {
+                "field": "string — one of: venue, year, type",
+                "verdict": "string — 'correct' if the stored value is right, "
+                           "'wrong' if you confirmed a different value, "
+                           "'unknown' if you could not confirm either way",
+                "proposed": "string|null — the correct value, exactly as the "
+                            "source prints it. null unless verdict is 'wrong'.",
+                "evidence": "string — the line you read the value off, quoted "
+                            "from the page, and which page it was.",
+                "source_url": "string|null — the URL you read it on, exactly "
+                              "as it appeared in the address bar.",
+            }
+        ],
+        "doi": "string|null — the paper's DOI, if you confirmed one and the "
+               "record above has none or has the wrong one.",
+    }
+
+    return "\n".join(filter(None, [
+        "A record in a bibliography looks wrong. Check it against the "
+        "published source.",
+        "",
+        "WHAT THE RECORD SAYS",
+        known,
+        "",
+        "WHAT LOOKS WRONG",
+        suspect,
+        "",
+        "Where to look, in order:",
+        "- The publisher's landing page for the DOI, or the arXiv abstract page "
+        "— its 'Journal reference' and 'Comments' fields often name the venue a "
+        "preprint was finally published at.",
+        "- DBLP, the ACL Anthology, or the proceedings' own front matter.",
+        "- Semantic Scholar, or the conference website for the year in question.",
+        "",
+        "Rules — these decide whether the answer is usable:",
+        "- A venue is the conference or journal the work appeared in. A "
+        "publisher ('Elsevier BV', 'Springer Nature', 'Association for "
+        "Computing Machinery') is not a venue, and neither is a preprint server "
+        "('arXiv', 'bioRxiv'). If the work only ever appeared as a preprint its "
+        "venue is genuinely unknown — answer 'unknown' rather than naming the "
+        "server.",
+        "- Name the venue as the source prints it. Do not expand an acronym the "
+        "source leaves unexpanded, and do not add a year or an ordinal.",
+        "- Quote the line you read it off in `evidence`, and give the page in "
+        "`source_url`. A field with no source is discarded, so an answer you "
+        "cannot cite is worth less than 'unknown'.",
+        "- Never report a value you reasoned to from the topic, the authors or "
+        "the year. Every character must come from a page you opened.",
+        "- Report only the fields listed above. Say 'correct' for the ones that "
+        "turn out to be right.",
         "",
         "Reply with a single JSON object, no markdown fence, matching this shape:",
         json.dumps(schema, indent=2),
