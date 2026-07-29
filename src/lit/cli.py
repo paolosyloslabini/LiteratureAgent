@@ -1166,7 +1166,13 @@ def cmd_ask(
     if res.pulled:
         console.print(f"[dim]Pulled into the library: {', '.join(res.pulled)}[/dim]")
     if res.unreadable:
-        console.print(f"[yellow]Could not read: {', '.join(res.unreadable)}[/yellow]")
+        # The keys alone read as a fault of the library. Each Evidence carries
+        # why that source could not be used — a paywall, a missing PDF, an LLM
+        # call that failed — and that is the part with a next step in it.
+        console.print(f"[yellow]Could not read {len(res.unreadable)} source(s):[/yellow]")
+        for ev in res.evidence:
+            if ev.error:
+                console.print(f"  [yellow]·[/yellow] {ev.entry.key}: {ev.error}")
 
     if save:
         save.write_text(_answer_markdown(res), encoding="utf-8")

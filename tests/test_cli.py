@@ -766,3 +766,29 @@ def test_ls_can_filter_for_unread(stocked):
     ))
     keys = [e["key"] for e in js(run("--json", "ls", "--status", "unread"))["entries"]]
     assert keys == ["new2024unread"]
+
+
+# --------------------------------------------------------------------------
+# `ask` says why a source could not be used, not just that it could not
+# --------------------------------------------------------------------------
+
+def test_ask_prints_why_each_source_could_not_be_read(stocked, monkeypatch):
+    """The keys alone read as a fault of the library; the reason has the fix in it."""
+    from lit.actions.ask import AskResult, Evidence
+
+    def fake_ask(ctx, question, **kw):
+        res = AskResult(question=question, answer="Nothing usable came back.")
+        res.consulted = ["vaswani2017attention", "doe2010obscure"]
+        res.evidence = [
+            Evidence(entry=stocked.get("vaswani2017attention"), relevant=False,
+                     error="full text no longer retrievable"),
+            Evidence(entry=stocked.get("doe2010obscure"), relevant=False,
+                     error="the `claude` CLI was not found"),
+        ]
+        res.unreadable = [ev.entry.key for ev in res.evidence]
+        return res
+
+    monkeypatch.setattr("lit.cli.ask_action", fake_ask)
+    out = run("ask", "a question").stdout
+    assert "vaswani2017attention: full text no longer retrievable" in out
+    assert "doe2010obscure: the `claude` CLI was not found" in out
