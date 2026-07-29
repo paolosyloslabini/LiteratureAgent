@@ -1,10 +1,13 @@
 """Bibliographic metadata lookup across Crossref, arXiv, OpenAlex and S2.
 
 Design notes:
-* OpenAlex is the primary source for reference lists and citation counts: it is
-  free, has no hard rate limit for polite users, and exposes `referenced_works`.
-* Semantic Scholar is richer for reference titles but rate-limits aggressively
-  without an API key, so it is a secondary source.
+* OpenAlex is the primary source for reference lists: it is free, has no hard
+  rate limit for polite users, and exposes `referenced_works`.
+* Semantic Scholar is richer for reference titles, and is the only source that
+  counts citations to arXiv-only work properly. It rate-limits aggressively
+  without an API key, so it is asked for one record per paper, no more.
+* No index is authoritative for citation counts; they are combined by taking
+  the largest, which `merge` explains.
 * Crossref is authoritative for the published version and gives ready BibTeX.
 * A published version always wins over a preprint, per the spec.
 """
@@ -83,7 +86,15 @@ class PaperMeta:
             self.year = other.year
         if not self.authors:
             self.authors = other.authors
-        if self.citation_count is None:
+        # Citation counts are lower bounds rather than measurements: an index
+        # can only count the citing works it has itself indexed, and it splits
+        # what it does have across the preprint and published records of the
+        # same paper. They undercount, never the reverse, so the largest number
+        # anyone reports is the best estimate available — first-wins would pin
+        # the result to whichever source happened to answer first.
+        if other.citation_count is not None and (
+            self.citation_count is None or other.citation_count > self.citation_count
+        ):
             self.citation_count = other.citation_count
         if self.type in ("other", "") and other.type not in ("other", ""):
             self.type = other.type
@@ -539,9 +550,11 @@ def resolve_metadata(
         if cr:
             meta = cr.merge(meta) if meta else cr
 
-        # OpenAlex then adds the two things Crossref does not do well: a
-        # dependable citation count (Crossref only counts DOI-registered
-        # citations, which undercounts badly in CS) and an open-access PDF link.
+        # OpenAlex then adds what Crossref does not do well: an open-access PDF
+        # link, and a citation count that counts citations from works with no
+        # DOI of their own (Crossref only counts DOI-registered ones, which
+        # undercounts in CS). Neither source is the last word on the count —
+        # S2 is consulted below and the largest figure wins.
         # If Crossref already gave us references, skip resolving OpenAlex's —
         # that is several extra requests for data we have.
         need_refs = with_references and not (meta and meta.references)
@@ -569,21 +582,33 @@ def resolve_metadata(
     if meta is None:
         return None
 
-    # Fill gaps (esp. reference lists) from S2 when we still need them.
-    if with_references and not meta.references:
-        ident = (f"DOI:{meta.doi}" if meta.doi
-                 else f"arXiv:{meta.arxiv_id}" if meta.arxiv_id else None)
-        if ident:
-            s2 = from_semantic_scholar(http, ident, cfg.semantic_scholar_api_key)
-            if s2:
-                meta.merge(s2)
+    if arxiv_id and not meta.arxiv_id:
+        meta.arxiv_id = arxiv_id
+
+    # Semantic Scholar last: for a reference list when nothing else supplied
+    # one, and — always — for a citation count.
+    #
+    # OpenAlex keeps arXiv-only work as a bare preprint record that the citing
+    # literature never points at, so its count for those papers is close to
+    # meaningless: 9 for GAIA and 53 for AgentBench, against 1032 and 1090 at
+    # S2. `quality.assess` grades a preprint on citations per year and nothing
+    # else, so those figures put landmark benchmarks two to three levels low or
+    # under the B threshold entirely, where they fell through to the reader
+    # agent's judgement. A count is worth one request per paper on its own.
+    ident = (f"DOI:{meta.doi}" if meta.doi
+             else f"arXiv:{meta.arxiv_id}" if meta.arxiv_id else None)
+    if ident:
+        s2 = from_semantic_scholar(
+            http, ident, cfg.semantic_scholar_api_key,
+            with_references=with_references and not meta.references,
+        )
+        if s2:
+            meta.merge(s2)
 
     if meta.doi and not meta.bibtex:
         meta.bibtex = crossref_bibtex(http, meta.doi)
     if not meta.bibtex:
         meta.bibtex = synth_bibtex(meta)
-    if arxiv_id and not meta.arxiv_id:
-        meta.arxiv_id = arxiv_id
     if meta.arxiv_id and not meta.oa_pdf_url:
         meta.oa_pdf_url = f"https://arxiv.org/pdf/{meta.arxiv_id}"
         meta.is_oa = True

@@ -283,6 +283,28 @@ def test_no_record_found_is_reported(monkeypatch, ctx):
     assert not ctx.library.keys()
 
 
+def test_an_unreachable_index_is_not_reported_as_a_missing_paper(monkeypatch, ctx):
+    """A rate-limited arXiv must not be dressed up as "no such paper".
+
+    The advice attached to `not_found` is "try a DOI, an arXiv id, or --pdf" —
+    all useless when the identifier was already correct and the index was
+    simply unreachable, and all of it sends the user off changing a correct
+    input.
+    """
+    def resolve_but_upstream_is_down(*a, **k):
+        ctx.http._note_unavailable()
+        return None
+
+    monkeypatch.setattr("lit.actions.add.resolve_metadata",
+                        resolve_but_upstream_is_down)
+    monkeypatch.setattr("lit.actions.add.fetch_fulltext", lambda *a, **k: None)
+
+    res = add_paper(ctx, "arxiv:2601.11868")
+    assert res.status == "unavailable"
+    assert "not a missing paper" in res.message
+    assert not ctx.library.keys()
+
+
 def test_duplicate_is_detected(monkeypatch, ctx):
     wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
     add_paper(ctx, "t")

@@ -292,6 +292,28 @@ always re-reads the notes off disk and restores them, so an entry object built
 from model output physically cannot overwrite them — including on re-reads and
 on import.
 
+## The browser
+
+`lit browse` is an optional two-pane viewer over a library: entries on top,
+the full record below. It buys nothing the subcommands don't — it is a faster
+way to work through a backlog.
+
+| key | |
+| --- | --- |
+| `↑` `↓` | move through the list; the pane below follows |
+| `^d` `^u` | scroll the record (or `tab` into it, or use the wheel) |
+| `R` | read this paper — `lit read <key>`, after a confirmation |
+| `o` / `c` | open the paper / its code repository in a browser |
+| `n` | edit your notes (saved exactly as `lit note` saves them) |
+| `/` `f` `s` `r` | search · filter · sort · reload |
+
+A read started with `R` runs in the background: the browser stays usable, the
+row shows `reading…`, and the cost lands in a notification when it finishes.
+
+Links open in the browser you actually look at. Under WSL that means the
+Windows side — Chrome if it is installed, otherwise the Windows default
+browser. `LIT_BROWSER` overrides the choice with a command of your own.
+
 ## Library layout
 
 ```

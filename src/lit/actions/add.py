@@ -44,7 +44,7 @@ MAX_PROMPT_CHARS = 400_000
 
 @dataclass
 class AddResult:
-    status: str  # added | updated | duplicate | rejected | not_found | error
+    status: str  # added | updated | duplicate | rejected | not_found | unavailable | error
     message: str
     entry: Entry | None = None
     verdict: LevelVerdict | None = None
@@ -93,6 +93,11 @@ def add_paper(
     target = target or parse_target(query)
 
     # ---- 1. metadata -----------------------------------------------------
+    # Remembered so a failure to resolve can say *why*: every index being
+    # unreachable looks identical to the paper not existing, and telling a user
+    # to "try a DOI" when arXiv was simply rate-limiting them sends them off
+    # fixing an input that was correct all along.
+    unavailable_before = ctx.http.unavailable_count
     if meta is None:
         ctx.vlog(f"resolving metadata for {target.describe()!r}")
         meta = resolve_metadata(
@@ -108,6 +113,13 @@ def add_paper(
             # No record online, but we hold the PDF — proceed off the file alone.
             meta = PaperMeta(title=target.title or Path(local_pdf).stem, type="other")
             warnings.append("no online record found; metadata taken from the filename")
+        elif ctx.http.unavailable_count > unavailable_before:
+            return AddResult(
+                "unavailable",
+                f"could not reach the metadata indexes for {target.describe()!r}. "
+                "This was a network or rate-limit failure, not a missing paper — "
+                "the record may well exist. Try again in a minute.",
+            )
         else:
             return AddResult(
                 "not_found",
