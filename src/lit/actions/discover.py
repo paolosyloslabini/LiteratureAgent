@@ -5,8 +5,17 @@ pool *before* any expensive work happens, then workers fan out over it. That
 way two agents never read the same paper, and nothing already in the library is
 proposed twice.
 
-Everything on the default path is free. The pool is fed from two sources that
-cost API calls rather than tokens:
+The request is read once, by the cheapest model available, into the parameters
+an index can actually be given: the topic in the field's own vocabulary, a
+couple of alternate phrasings, a year window, a document type (see
+`SearchPlan`). "Recent surveys on RAG, nothing before 2022" is a sentence a
+person understands and a keyword index does not — handed it whole, Crossref
+matches `recent` and `nothing`. Everything downstream is asked what the plan
+says, and the window holds for mined references and scouts too, not just for
+the sources that had a filter field for it.
+
+Apart from that one call, everything on the default path is free. The pool is
+fed from two sources that cost API calls rather than tokens:
 
 1. **Reference mining** (no LLM, no hallucination risk). Every entry already in
    the library carries a structured reference list pulled from the metadata
@@ -55,8 +64,10 @@ from ..llm import LLMError
 from ..models import normalize_arxiv, normalize_doi, slugify
 from ..prompts import (
     DISCOVERY_ANGLES,
+    PLANNER_SYSTEM,
     SCOUT_SYSTEM,
     discover_prompt,
+    plan_query_prompt,
     rank_candidates_prompt,
 )
 from ..quality import citations_per_year, venue_level
@@ -126,6 +137,122 @@ SEARCH_FACETS: list[tuple[str, str]] = [
     ("surveys", "reviews and survey articles"),
     ("preprints", "arXiv preprints, including work too new to be indexed"),
 ]
+
+
+# ---- query planning -------------------------------------------------------
+# How many index queries one plan may carry. Each is another request to each
+# index; past a handful, paraphrases of the same topic return the same works.
+MAX_PLAN_QUERIES = 3
+# Tags the plan may hang on what it finds.
+MAX_PLAN_TAGS = 6
+# Document types a request may ask for, spelled as OpenAlex spells them.
+PLAN_KINDS = ["review", "article", "preprint", "book", "book-chapter",
+              "dataset", "dissertation", "report"]
+# Words people use for those types, mapped onto them.
+_KIND_ALIASES = {"reviews": "review", "survey": "review", "surveys": "review",
+                 "review article": "review", "journal article": "article",
+                 "articles": "article", "preprints": "preprint",
+                 "books": "book", "datasets": "dataset", "thesis": "dissertation",
+                 "reports": "report"}
+# A year outside this is a parsing accident, not a date the person meant.
+EARLIEST_PLAUSIBLE_YEAR = 1600
+
+
+@dataclass
+class SearchPlan:
+    """What a plain-language request turns out to be asking the indexes for.
+
+    A query typed at a person — "recent surveys on RAG, nothing before 2022" —
+    is not a query an index can answer. Crossref and OpenAlex have fields for
+    two thirds of that sentence, but handed it whole they match `recent` and
+    `nothing` as keywords. This is that sentence taken apart: the topic in the
+    field's own vocabulary, a date window, a document type.
+
+    `planned` is False when the parse did not happen (no LLM, a failed call,
+    `--no-plan`), in which case the string is searched exactly as typed — the
+    behaviour this replaced.
+    """
+
+    query: str  # what the user typed, kept verbatim for ranking and display
+    topic: str = ""
+    # Index queries, most direct first. Alternates re-phrase the same topic in
+    # a neighbouring field's vocabulary.
+    queries: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    year_from: int | None = None
+    year_to: int | None = None
+    kind: str | None = None
+    intent: str = ""
+    planned: bool = False
+
+    @classmethod
+    def unplanned(cls, query: str) -> "SearchPlan":
+        """The query as typed, which is what every index gets asked."""
+        return cls(query=query, topic=query, queries=[query])
+
+    @property
+    def primary(self) -> str:
+        return self.queries[0] if self.queries else self.query
+
+    @property
+    def alternates(self) -> list[str]:
+        return self.queries[1:]
+
+    @property
+    def has_window(self) -> bool:
+        return bool(self.year_from or self.year_to)
+
+    def allows(self, year: int | None) -> bool:
+        """Is a paper from this year inside the window the request asked for?
+
+        A candidate whose year nothing knows passes. The window rules out what
+        the request excluded; it is not a demand that every paper prove a date.
+        """
+        if year is None:
+            return True
+        if self.year_from and year < self.year_from:
+            return False
+        return not (self.year_to and year > self.year_to)
+
+    def constraints(self) -> tuple[str, ...]:
+        """The hard limits, phrased for the agents that also have to honour them."""
+        out = []
+        if self.year_from and self.year_to:
+            out.append(f"published between {self.year_from} and {self.year_to}")
+        elif self.year_from:
+            out.append(f"published in {self.year_from} or later")
+        elif self.year_to:
+            out.append(f"published in {self.year_to} or earlier")
+        if self.kind:
+            out.append(f"{self.kind} documents only")
+        return tuple(out)
+
+    def summary_lines(self) -> list[str]:
+        """What was understood, for the user to see before anything is spent."""
+        lines = [f"  topic: {self.topic}"] if self.topic else []
+        if self.queries:
+            lines.append("  asking: " + " · ".join(f"{q!r}" for q in self.queries))
+        window = ""
+        if self.year_from and self.year_to:
+            window = f"{self.year_from}–{self.year_to}"
+        elif self.year_from:
+            window = f"{self.year_from}–"
+        elif self.year_to:
+            window = f"–{self.year_to}"
+        extras = [f"years: {window}" if window else "",
+                  f"type: {self.kind}" if self.kind else "",
+                  f"tags: {', '.join(self.tags)}" if self.tags else ""]
+        if any(extras):
+            lines.append("  " + "   ".join(e for e in extras if e))
+        return lines
+
+    def to_dict(self) -> dict:
+        return {
+            "query": self.query, "planned": self.planned, "topic": self.topic,
+            "queries": list(self.queries), "tags": list(self.tags),
+            "year_from": self.year_from, "year_to": self.year_to,
+            "kind": self.kind, "intent": self.intent,
+        }
 
 
 @dataclass
@@ -253,11 +380,13 @@ class FindResult:
     candidates: list[Candidate] = field(default_factory=list)
     added: list[AddResult] = field(default_factory=list)
     scout_errors: list[str] = field(default_factory=list)
+    plan: SearchPlan | None = None
     pool_size: int = 0
     from_references: int = 0
     from_search: int = 0
     from_scouts: int = 0
     dropped_off_topic: int = 0
+    dropped_out_of_window: int = 0
     # True when the candidates were filed without being read.
     unread: bool = False
 
@@ -266,6 +395,7 @@ class FindResult:
             "candidates": [c.to_dict() for c in self.candidates],
             "results": [r.to_dict() for r in self.added],
             "scout_errors": self.scout_errors,
+            "plan": self.plan.to_dict() if self.plan else None,
             "unread": self.unread,
             "pool": {
                 "total": self.pool_size,
@@ -273,8 +403,102 @@ class FindResult:
                 "from_search": self.from_search,
                 "from_scouts": self.from_scouts,
                 "dropped_off_topic": self.dropped_off_topic,
+                "dropped_out_of_window": self.dropped_out_of_window,
             },
         }
+
+
+def plan_query(ctx: Ctx, query: str) -> SearchPlan:
+    """Read the request into index parameters with one cheap call.
+
+    Falls back to the query as typed on any failure. A search that runs on a
+    slightly worse query is a far better outcome than one that does not run.
+    """
+    if not ctx.llm.available:
+        ctx.vlog("no LLM available, searching the query exactly as typed")
+        return SearchPlan.unplanned(query)
+    try:
+        data = ctx.llm.json(
+            plan_query_prompt(
+                query=query, scope=ctx.library.settings.scope,
+                this_year=date.today().year, max_queries=MAX_PLAN_QUERIES,
+                kinds=PLAN_KINDS,
+            ),
+            system=PLANNER_SYSTEM,
+            role="plan",
+            required=("queries",),
+        )
+    except LLMError as exc:
+        ctx.vlog(f"query planning failed, searching as typed: {exc}")
+        return SearchPlan.unplanned(query)
+    return read_plan(query, data)
+
+
+def read_plan(query: str, data: dict) -> SearchPlan:
+    """Turn the planner's JSON into a plan, discarding anything implausible.
+
+    Kept separate from the call because this is where a cheap model's output
+    gets held at arm's length: a year it invented, a document type that is not
+    a type, an empty query list. Anything unusable falls back to the query as
+    typed rather than searching on nonsense.
+    """
+    queries = _clean_strings(data.get("queries"), MAX_PLAN_QUERIES, min_len=2)
+    topic = " ".join(str(data.get("topic") or "").split())
+    if not queries and len(topic) >= 2:
+        queries = [topic]
+    if not queries:
+        return SearchPlan.unplanned(query)
+
+    lo = _plan_year(data.get("year_from"))
+    hi = _plan_year(data.get("year_to"))
+    if lo and hi and lo > hi:
+        lo, hi = hi, lo
+
+    kind = str(data.get("kind") or "").strip().lower()
+    kind = _KIND_ALIASES.get(kind, kind)
+
+    return SearchPlan(
+        query=query,
+        topic=topic or queries[0],
+        queries=queries,
+        tags=_plan_tags(data.get("tags")),
+        year_from=lo,
+        year_to=hi,
+        kind=kind if kind in PLAN_KINDS else None,
+        intent=" ".join(str(data.get("intent") or "").split())[:400],
+        planned=True,
+    )
+
+
+def _clean_strings(raw, cap: int, *, min_len: int) -> list[str]:
+    """De-duplicated, whitespace-normalized strings, in the order given."""
+    if isinstance(raw, str):
+        raw = [raw]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in (raw or []):
+        s = " ".join(str(item).split())
+        if len(s) < min_len or s.lower() in seen:
+            continue
+        seen.add(s.lower())
+        out.append(s)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _plan_tags(raw) -> list[str]:
+    tags = _clean_strings(raw, MAX_PLAN_TAGS, min_len=2)
+    return [t.lower().replace(" ", "-").strip("-") for t in tags]
+
+
+def _plan_year(v) -> int | None:
+    """A four-digit year, or None if what came back cannot be one."""
+    try:
+        year = int(str(v).strip()[:4])
+    except (TypeError, ValueError):
+        return None
+    return year if EARLIEST_PLAUSIBLE_YEAR <= year <= date.today().year + 1 else None
 
 
 def discover(
@@ -287,9 +511,11 @@ def discover(
     use_references: bool = True,
     use_web: bool = True,
     use_scouts: bool = False,
+    use_plan: bool = True,
 ) -> FindResult:
     """Build the de-duplicated candidate pool. Nothing is read or added here.
 
+    `use_plan` is the cheap call that reads the request into index parameters;
     `use_web` covers the free indexed search; `use_scouts` adds the LLM web
     agents on top and is what `--parallel` turns on.
     """
@@ -305,7 +531,20 @@ def discover(
     # an online source like any other, so it switches them off too.
     use_scouts = use_scouts and use_web
 
-    result = FindResult()
+    # Every source below is asked what the plan says the request means, not what
+    # the user typed at it — including the year window, which reference mining
+    # and the scouts have to honour as much as the indexes do.
+    plan = SearchPlan.unplanned(query)
+    if use_plan:
+        ctx.log("[bold]Planning[/bold] the search from your query…")
+        plan = plan_query(ctx, query)
+        if plan.planned:
+            for line in plan.summary_lines():
+                ctx.log(f"[dim]{line}[/dim]")
+        else:
+            ctx.log("[dim]  (could not read the query — searching it as typed)[/dim]")
+
+    result = FindResult(plan=plan)
     pool: dict[str, Candidate] = {}
 
     def absorb(c: Candidate) -> None:
@@ -351,11 +590,13 @@ def discover(
     # ---- source 2: indexed search, free ----------------------------------
     if use_web:
         per_facet = max(5, limit)
+        extra = (f" × {len(plan.queries)} phrasings" if len(plan.queries) > 1
+                 else "")
         ctx.log(
-            f"[bold]Searching[/bold] {len(SEARCH_FACETS)} indexes "
+            f"[bold]Searching[/bold] {len(SEARCH_FACETS)} indexes{extra} "
             f"(Crossref, OpenAlex, arXiv) — no tokens spent…"
         )
-        hits = _search_candidates(ctx, query, per_facet=per_facet)
+        hits = _search_candidates(ctx, plan, per_facet=per_facet)
         result.from_search = len(hits)
         for c in hits:
             absorb(c)
@@ -374,6 +615,7 @@ def discover(
                 discover_prompt(
                     query=query, scope=lib.settings.scope, angle=angle,
                     limit=per_angle, exclude_titles=exclude,
+                    intent=plan.intent, constraints=plan.constraints(),
                 ),
                 system=SCOUT_SYSTEM,
                 role="scout",
@@ -406,6 +648,12 @@ def discover(
     # ---- rank: relevance first, importance second -------------------------
     considered = sorted(pool.values(), key=lambda c: c.triage_key)
     result.pool_size = len(considered)
+
+    # The window is applied twice: here, so a paper the request excluded cannot
+    # take a slot in the trimmed pool, and again after enrichment, which is
+    # where a candidate that arrived without a year finally gets one.
+    considered, out_of_window = _apply_window(plan, considered)
+
     cap = _pool_cap(limit)
     if len(considered) > cap:
         considered = _trim_pool(considered, cap)
@@ -415,7 +663,14 @@ def discover(
 
     if considered:
         _enrich(ctx, considered)
-        _score_relevance(ctx, query, considered)
+        considered, late = _apply_window(plan, considered)
+        out_of_window += late
+
+    result.dropped_out_of_window = out_of_window
+    if out_of_window:
+        ctx.log(f"  {out_of_window} dropped as outside {plan.constraints()[0]}")
+    if considered:
+        _score_relevance(ctx, plan, considered)
 
     kept = [c for c in considered
             if c.relevance is None or c.relevance >= MIN_RELEVANCE]
@@ -453,22 +708,49 @@ def _trim_pool(candidates: list[Candidate], cap: int) -> list[Candidate]:
     return sorted(kept, key=lambda c: c.triage_key)
 
 
-def _search_candidates(ctx: Ctx, query: str, *, per_facet: int) -> list[Candidate]:
-    """Ask the free indexes the same question several different ways.
+def _apply_window(plan: SearchPlan, candidates: list[Candidate]
+                  ) -> tuple[list[Candidate], int]:
+    """Drop candidates published outside the window the request asked for.
 
-    Runs the facets concurrently — they are independent HTTP requests to three
-    different services, so waiting on them one at a time is pure latency.
+    The indexes were already told the window, but the other two sources cannot
+    be: a reference mined from a paper you own and a title a scout came back
+    with arrive with whatever year they have. "Nothing before 2022" has to hold
+    for those too, or the filter only applies to the source that needed it least.
     """
-    def run(facet: tuple[str, str]) -> list[Candidate]:
-        metas = _search_facet(ctx, query, facet[0], per_facet)
-        return [c for c in (_meta_to_candidate(m, facet[0]) for m in metas) if c]
+    if not plan.has_window:
+        return candidates, 0
+    kept = [c for c in candidates if plan.allows(c.year)]
+    return kept, len(candidates) - len(kept)
+
+
+def _search_candidates(ctx: Ctx, plan: SearchPlan, *,
+                       per_facet: int) -> list[Candidate]:
+    """Ask the free indexes what the plan says the request means.
+
+    Two dimensions, not one. The facets ask the same query several ways —
+    best match, most-cited, recent, reviews, preprints. The plan's alternate
+    phrasings ask the same *question* in another field's words, and only on the
+    best-match facet: re-running "most-cited" over a paraphrase mostly returns
+    the works the first phrasing already found, and each pairing is another
+    round trip to a free service.
+
+    Runs concurrently — they are independent HTTP requests to three different
+    services, so waiting on them one at a time is pure latency.
+    """
+    tasks = [(plan.primary, facet) for facet, _ in SEARCH_FACETS]
+    tasks += [(q, "relevance") for q in plan.alternates]
+
+    def run(task: tuple[str, str]) -> list[Candidate]:
+        query, facet = task
+        metas = _search_facet(ctx, query, facet, per_facet, plan)
+        return [c for c in (_meta_to_candidate(m, facet) for m in metas) if c]
 
     runs = run_parallel(
-        SEARCH_FACETS, run,
-        workers=min(len(SEARCH_FACETS), max(2, ctx.workers)),
+        tasks, run,
+        workers=min(len(tasks), max(2, ctx.workers)),
         on_done=lambda r: ctx.vlog(
-            f"  facet {r.item[0]}: {len(r.value or [])} hits" if r.ok
-            else f"  facet {r.item[0]} failed: {r.error}"
+            f"  {r.item[1]} {r.item[0]!r}: {len(r.value or [])} hits" if r.ok
+            else f"  {r.item[1]} {r.item[0]!r} failed: {r.error}"
         ),
     )
     out: list[Candidate] = []
@@ -478,19 +760,35 @@ def _search_candidates(ctx: Ctx, query: str, *, per_facet: int) -> list[Candidat
     return out
 
 
-def _search_facet(ctx: Ctx, query: str, facet: str, limit: int) -> list[PaperMeta]:
+def _search_facet(ctx: Ctx, query: str, facet: str, limit: int,
+                  plan: SearchPlan) -> list[PaperMeta]:
     """One facet of the free search. Split out so tests can stub the network."""
     http = ctx.http
+    lo, hi, kind = plan.year_from, plan.year_to, plan.kind
     if facet == "foundational":
-        return search_openalex(http, query, limit=limit, sort="cited_by_count:desc")
+        return search_openalex(http, query, limit=limit, sort="cited_by_count:desc",
+                               from_year=lo, to_year=hi, kind=kind)
     if facet == "recent":
-        return search_openalex(http, query, limit=limit,
-                               from_year=date.today().year - RECENT_YEARS)
+        floor = date.today().year - RECENT_YEARS
+        # "Recent" and a window that closes before it are contradictory; the
+        # window is what the person actually asked for, so the facet stands down.
+        if hi and hi < floor:
+            return []
+        return search_openalex(http, query, limit=limit, kind=kind,
+                               from_year=max(floor, lo or floor), to_year=hi)
     if facet == "surveys":
-        return search_openalex(http, query, limit=limit, kind="review")
+        return search_openalex(http, query, limit=limit, kind="review",
+                               from_year=lo, to_year=hi)
     if facet == "preprints":
-        return search_arxiv(http, query, limit=limit)
-    return search_works(http, query, limit, ctx.cfg.fetch)
+        return search_arxiv(http, query, limit=limit, from_year=lo, to_year=hi)
+    if kind:
+        # Crossref has no filter for "reviews only", OpenAlex does. A document
+        # type the request actually asked for is worth giving up Crossref's
+        # index for on this one facet.
+        return search_openalex(http, query, limit=limit, kind=kind,
+                               from_year=lo, to_year=hi)
+    return search_works(http, query, limit, ctx.cfg.fetch,
+                        from_year=lo, to_year=hi)
 
 
 def _meta_to_candidate(meta: PaperMeta, facet: str) -> Candidate | None:
@@ -567,8 +865,14 @@ def _lookup_meta(ctx: Ctx, c: Candidate):
     )
 
 
-def _score_relevance(ctx: Ctx, query: str, candidates: list[Candidate]) -> None:
+def _score_relevance(ctx: Ctx, plan: SearchPlan,
+                     candidates: list[Candidate]) -> None:
     """One LLM call scoring the whole pool against the query.
+
+    Scored against what the user typed, not against the plan's queries: the
+    plan is how the indexes were asked, and a keyword phrasing is a lossy
+    rendering of a request. The plan's reading of it rides along as context so
+    the same understanding decides the cut.
 
     Leaves `relevance` as None on every candidate if it cannot run, which the
     caller reads as "fall back to importance order" rather than "drop them all".
@@ -580,7 +884,9 @@ def _score_relevance(ctx: Ctx, query: str, candidates: list[Candidate]) -> None:
     try:
         data = ctx.llm.json(
             rank_candidates_prompt(
-                query=query, scope=ctx.library.settings.scope, candidates=candidates
+                query=plan.query, scope=ctx.library.settings.scope,
+                candidates=candidates, intent=plan.intent,
+                constraints=plan.constraints(),
             ),
             system=SCOUT_SYSTEM,
             role="rank",

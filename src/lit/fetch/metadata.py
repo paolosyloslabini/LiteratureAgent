@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import date
 
 from ..config import FetchConfig
 from ..models import Reference, normalize_arxiv, normalize_doi
@@ -344,13 +345,14 @@ _OA_SEARCH_SELECT = (
 
 def search_openalex(http: HttpClient, query: str, *, limit: int = 10,
                     sort: str | None = None, from_year: int | None = None,
+                    to_year: int | None = None,
                     kind: str | None = None) -> list[PaperMeta]:
     """Keyword search against OpenAlex, with the facets `find` discovers on.
 
     Free, structured, and hallucination-proof: every hit is a real indexed work
-    with its own identifiers and citation count. `sort`, `from_year` and `kind`
-    are what let one query be asked several different ways — most-cited,
-    published since a date, reviews only — which is the cheap equivalent of
+    with its own identifiers and citation count. `sort`, the year window and
+    `kind` are what let one query be asked several different ways — most-cited,
+    published between two dates, reviews only — which is the cheap equivalent of
     pointing several scout agents at different angles.
     """
     params: dict = {"search": query, "per-page": max(1, limit),
@@ -358,6 +360,8 @@ def search_openalex(http: HttpClient, query: str, *, limit: int = 10,
     filters = []
     if from_year:
         filters.append(f"from_publication_date:{from_year}-01-01")
+    if to_year:
+        filters.append(f"to_publication_date:{to_year}-12-31")
     if kind:
         filters.append(f"type:{kind}")
     if filters:
@@ -424,16 +428,26 @@ def _deinvert_abstract(index: dict | None) -> str:
     return _clean(" ".join(w for _, w in words))
 
 
-def search_arxiv(http: HttpClient, query: str, *, limit: int = 10) -> list[PaperMeta]:
+def search_arxiv(http: HttpClient, query: str, *, limit: int = 10,
+                 from_year: int | None = None,
+                 to_year: int | None = None) -> list[PaperMeta]:
     """Keyword search against arXiv. Catches preprints the indexes lag on.
 
     Relevance order only. arXiv's `all:` treats a multi-word query loosely, so
     sorting those matches by date returns whatever was submitted this morning
     rather than recent work on the topic — recency is the OpenAlex facet's job,
     where it is a filter on a real query rather than a sort over everything.
+
+    A year window, when the query implies one, goes in as a `submittedDate`
+    range: still relevance-ordered, but only over the window.
     """
+    search = f"all:{query}"
+    if from_year or to_year:
+        lo = f"{from_year or 1991}01010000"
+        hi = f"{to_year or date.today().year}12312359"
+        search = f"({search}) AND submittedDate:[{lo} TO {hi}]"
     r = http.get(ARXIV_API, params={
-        "search_query": f"all:{query}",
+        "search_query": search,
         "max_results": max(1, limit),
         "sortBy": "relevance",
         "sortOrder": "descending",
@@ -453,17 +467,23 @@ def search_arxiv(http: HttpClient, query: str, *, limit: int = 10) -> list[Paper
 
 
 def search_works(http: HttpClient, query: str, limit: int = 10,
-                 cfg: FetchConfig | None = None) -> list[PaperMeta]:
+                 cfg: FetchConfig | None = None, *,
+                 from_year: int | None = None,
+                 to_year: int | None = None) -> list[PaperMeta]:
     """Title/keyword search. Crossref first, OpenAlex as a fallback."""
     out: list[PaperMeta] = []
-    data = http.get_json(
-        CROSSREF_API,
-        params={"query.bibliographic": query, "rows": limit,
-                # The abstract rides along because ranking a candidate pool from
-                # bare titles is guesswork; it costs nothing extra to ask for.
-                "select": "DOI,title,author,issued,container-title,type,"
-                          "is-referenced-by-count,URL,abstract"},
-    )
+    params: dict = {
+        "query.bibliographic": query, "rows": limit,
+        # The abstract rides along because ranking a candidate pool from
+        # bare titles is guesswork; it costs nothing extra to ask for.
+        "select": "DOI,title,author,issued,container-title,type,"
+                  "is-referenced-by-count,URL,abstract",
+    }
+    window = [f"from-pub-date:{from_year}-01-01" if from_year else "",
+              f"until-pub-date:{to_year}-12-31" if to_year else ""]
+    if any(window):
+        params["filter"] = ",".join(f for f in window if f)
+    data = http.get_json(CROSSREF_API, params=params)
     for m in ((data or {}).get("message") or {}).get("items") or []:
         title = _first(m.get("title"))
         if not title:
@@ -482,7 +502,8 @@ def search_works(http: HttpClient, query: str, limit: int = 10,
 
     if len(out) < limit:
         seen = {m.doi for m in out if m.doi}
-        for meta in search_openalex(http, query, limit=limit):
+        for meta in search_openalex(http, query, limit=limit,
+                                    from_year=from_year, to_year=to_year):
             if meta.doi and meta.doi in seen:
                 continue
             out.append(meta)

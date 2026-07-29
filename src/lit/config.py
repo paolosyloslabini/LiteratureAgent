@@ -50,6 +50,7 @@ CONFIG_PATH = _LazyPath()
 # Per-role model defaults. Work is split so the cheap, high-volume steps run on
 # a cheap model and only the steps that need real comprehension pay for it.
 #
+#   plan      — reading a plain-language query into index search parameters
 #   scout     — web search for candidate papers (many calls, shallow judgement)
 #   filter    — filtering library hits by title/summary
 #   rank      — scoring a pool of candidate papers for relevance to a query
@@ -57,6 +58,7 @@ CONFIG_PATH = _LazyPath()
 #   analyst   — extracting quoted evidence, tracing a claim through a paper
 #   synthesis — writing the final cited answer
 DEFAULT_ROLE_MODELS: dict[str, str] = {
+    "plan": "haiku",
     "scout": "haiku",
     "filter": "haiku",
     "rank": "haiku",
