@@ -1,2 +1,2 @@
 # LiteratureAgent
-A claude-code driven literature repo
+A small, LLM driven tool to collect, organize, and query research literature. 
