@@ -101,11 +101,16 @@ class LLMConfig:
 
 @dataclass
 class FetchConfig:
-    # Sent to Crossref/Unpaywall/OpenAlex for polite-pool rate limits. Unpaywall
+    # Sent to Crossref and Unpaywall for polite-pool rate limits. Unpaywall
     # requires it; without one that resolver is skipped.
     email: str = ""
-    # Optional Semantic Scholar key. Without it S2 is heavily rate limited, so
-    # OpenAlex is used as the primary reference source either way.
+    # Optional Semantic Scholar key, and the most useful thing in this file to
+    # set. S2 supplies the citation counts `find` ranks on and is the only free
+    # index that counts citations to arXiv-only work properly. Unauthenticated
+    # callers share one pool with the rest of the world and are throttled to
+    # roughly a request a second, so on a busy day facets come back empty and a
+    # search silently loses its sense of which papers are landmark. A key is
+    # free: https://www.semanticscholar.org/product/api#api-key-form
     semantic_scholar_api_key: str = ""
     timeout_s: int = 60
     max_pdf_mb: int = 60
@@ -124,8 +129,8 @@ class FetchConfig:
     max_read_pages: int = 10
 
     # ---- last-resort full-text resolver -------------------------------------
-    # Tried only after every open-access route (arXiv, PMC, Unpaywall, OpenAlex,
-    # publisher OA, local PDFs) has failed. Both ship empty; nothing is
+    # Tried only after every open-access route (arXiv, PMC, Unpaywall, indexed
+    # OA links, publisher OA, local PDFs) has failed. Both ship empty; nothing is
     # contacted unless you configure it.
     #
     # `fallback_url_template` takes {doi}, and may point at either a PDF or a

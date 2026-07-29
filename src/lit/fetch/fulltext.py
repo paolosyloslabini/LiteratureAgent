@@ -1,7 +1,7 @@
 """Full-text acquisition: get the actual words of a paper, or fail honestly.
 
 Resolvers are tried in order of reliability. The built-in ones are all sources
-the publisher or author has made openly available (arXiv, PMC, OpenAlex and
+the publisher or author has made openly available (arXiv, PMC, Semantic Scholar and
 Unpaywall OA links, publisher OA pages), plus PDFs you supply yourself.
 
 After those, a single user-configured resolver of last resort can run — either
@@ -246,7 +246,7 @@ def _pdf_candidates(http: HttpClient, meta: PaperMeta,
 
     if meta.arxiv_id:
         add(f"https://arxiv.org/pdf/{meta.arxiv_id}", "arxiv")
-    add(meta.oa_pdf_url, "openalex-oa" if meta.is_oa else "oa-link")
+    add(meta.oa_pdf_url, "index-oa" if meta.is_oa else "oa-link")
 
     if meta.pmcid:
         add(f"{EUROPEPMC_API}/{meta.pmcid}/fullTextPDF", "europepmc")

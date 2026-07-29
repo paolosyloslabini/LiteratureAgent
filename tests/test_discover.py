@@ -21,6 +21,10 @@ from lit.fetch.metadata import PaperMeta
 from lit.models import Reference, slugify
 from lit.runner import run_parallel
 
+# Captured before the `no_network` fixture stubs it out, so the tests that are
+# *about* facet dispatch exercise the real thing rather than the stub.
+REAL_SEARCH_FACET = D._search_facet
+
 
 @pytest.fixture
 def ctx(lib, cfg):
@@ -29,20 +33,31 @@ def ctx(lib, cfg):
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    """Both free sources reach the network; tests that care stub them explicitly.
+    """Every free source reaches the network; tests that care stub them.
 
-    `_lookup_meta` is the enrichment lookup, `_search_facet` the indexed search.
+    `_search_facet` is the indexed search. Enrichment has two doors: candidates
+    carrying an identifier go through `_batch_lookup` in one request, and only
+    those with nothing but a title fall back to `_lookup_meta`.
     """
     monkeypatch.setattr(D, "_lookup_meta", lambda ctx, c: None)
+    monkeypatch.setattr(D, "_batch_lookup", lambda ctx, idents: {})
     monkeypatch.setattr(D, "_search_facet", lambda ctx, q, facet, limit, plan: [])
 
 
 def stub_metadata(monkeypatch, by_title: dict):
-    """Give named candidates a citation count / venue, as OpenAlex would."""
+    """Give named candidates a citation count / venue, as the index would."""
     def fake(ctx, c):
         spec = by_title.get(c.title)
         return PaperMeta(**spec) if spec else None
     monkeypatch.setattr(D, "_lookup_meta", fake)
+
+
+def stub_batch(monkeypatch, by_ident: dict):
+    """Script the batched metadata lookup, keyed by S2-style identifier."""
+    def fake(ctx, idents):
+        return {i: PaperMeta(**by_ident[i]) for i in idents if i in by_ident}
+    monkeypatch.setattr(D, "_batch_lookup", fake)
+    return fake
 
 
 def stub_search(monkeypatch, by_facet: dict):
@@ -528,11 +543,47 @@ def test_the_recency_facet_stands_down_when_the_window_closes_before_it(ctx,
                                                                        monkeypatch):
     """'Recent' and 'nothing after 2010' contradict; the request wins."""
     calls = []
-    monkeypatch.setattr(D, "search_openalex",
-                        lambda *a, **kw: calls.append(kw) or [])
+    for name in ("search_semantic_scholar", "search_crossref"):
+        monkeypatch.setattr(D, name, lambda *a, **kw: calls.append(kw) or [])
     plan = D.read_plan("raw", {"queries": ["topic"], "year_to": 2010})
-    assert D._search_facet(ctx, "topic", "recent", 5, plan) == []
+    assert REAL_SEARCH_FACET(ctx, "topic", "recent", 5, plan) == []
     assert not calls
+
+
+def test_the_most_cited_facet_asks_both_citation_aware_indexes(ctx, monkeypatch):
+    """This facet is the whole of 'what are the landmark papers here'. Crossref
+    cannot see a preprint and S2 can be rate-limited into silence, so asking one
+    of them means the facet quietly returns nothing on a bad day."""
+    asked = []
+
+    def fake_s2(http, query, **kw):
+        asked.append(("s2", kw.get("sort")))
+        return [PaperMeta(title="From S2", doi="10.1/s2")]
+
+    def fake_cr(http, query, limit=10, **kw):
+        asked.append(("crossref", kw.get("sort")))
+        return [PaperMeta(title="From Crossref", doi="10.1/cr")]
+
+    monkeypatch.setattr(D, "search_semantic_scholar", fake_s2)
+    monkeypatch.setattr(D, "search_crossref", fake_cr)
+    plan = D.read_plan("raw", {"queries": ["topic"]})
+    titles = [m.title
+              for m in REAL_SEARCH_FACET(ctx, "topic", "foundational", 5, plan)]
+
+    assert {"From S2", "From Crossref"} == set(titles)
+    assert ("s2", D.S2_SORT_CITED) in asked
+    assert ("crossref", D.CROSSREF_SORT_CITED) in asked
+
+
+def test_merging_two_indexes_drops_the_same_work_twice():
+    """One paper registered in both indexes must not occupy two slots, however
+    differently the two spell its title."""
+    a = [PaperMeta(title="Shared", doi="10.1/x"), PaperMeta(title="Only A")]
+    b = [PaperMeta(title="Shared Elsewhere", doi="10.1/x"),
+         PaperMeta(title="Only B")]
+    # Interleaved, so a slice downstream takes the best of each index rather
+    # than all of whichever answered first.
+    assert [m.title for m in D._merge_metas(a, b)] == ["Shared", "Only A", "Only B"]
 
 
 # --------------------------------------------------------------------------
@@ -724,6 +775,75 @@ def test_enrichment_fills_citations_before_the_cut(ctx, monkeypatch):
     res = discover(ctx, "topic", limit=5, angles=1, use_references=False, use_scouts=True)
     assert res.candidates[0].citation_count == 1234
     assert res.candidates[0].venue == "ICLR"
+
+
+def test_candidates_with_identifiers_are_weighed_in_one_request(ctx, monkeypatch):
+    """Enrichment is the difference between a measured importance and an assumed
+    one, so it has to run over the whole pool — which it can only afford as a
+    single batched call against an index that throttles at roughly 1/second."""
+    ctx._llm = ScoutLLM([])
+    stub_search(monkeypatch, {"relevance": [
+        hit("Landmark", doi="10.1/a"), hit("Preprint", arxiv_id="2501.00001"),
+    ]})
+    batches = []
+
+    def fake(ctx_, idents):
+        batches.append(sorted(idents))
+        return {"DOI:10.1/a": PaperMeta(citation_count=3127, venue="ICLR"),
+                "arXiv:2501.00001": PaperMeta(citation_count=511)}
+
+    monkeypatch.setattr(D, "_batch_lookup", fake)
+    monkeypatch.setattr(D, "_lookup_meta", lambda ctx_, c: pytest.fail(
+        "a candidate with an identifier must not need its own lookup"))
+
+    res = discover(ctx, "topic", limit=5, use_references=False)
+    by_title = {c.title: c for c in res.candidates}
+
+    assert batches == [["DOI:10.1/a", "arXiv:2501.00001"]]
+    assert by_title["Landmark"].citation_count == 3127
+    assert by_title["Preprint"].citation_count == 511
+
+
+def test_a_search_that_never_reached_an_index_is_reported(ctx, monkeypatch):
+    """A dead index returns an empty list, which reads exactly like a search
+    that ran and found nothing. Absorbing that silently is how a run loses its
+    most-cited facet and still prints a confident table."""
+    ctx._llm = ScoutLLM([])
+
+    def flaky(ctx_, query, facet, limit, plan):
+        if facet == "foundational":
+            ctx_.http._note_unavailable()
+            return []
+        return [PaperMeta(**hit("Survivor"))] if facet == "relevance" else []
+
+    monkeypatch.setattr(D, "_search_facet", flaky)
+    res = discover(ctx, "topic", limit=5, use_references=False)
+
+    assert res.search_failures == 1
+    assert res.degraded
+    assert res.to_dict()["index_failures"]["search"] == 1
+
+
+def test_a_pool_ranked_without_citation_counts_says_so(ctx, monkeypatch):
+    """With no count, importance falls back to one assumed value shared by every
+    such paper — so the ranking is doing far less than the table suggests."""
+    ctx._llm = ScoutLLM([])
+    stub_search(monkeypatch, {"relevance": [hit("Unknown", doi="10.1/a")]})
+    monkeypatch.setattr(D, "_batch_lookup", lambda ctx_, idents: {})
+
+    res = discover(ctx, "topic", limit=5, use_references=False)
+
+    assert res.unweighed == 1
+    assert res.to_dict()["index_failures"]["ranked_without_citations"] == 1
+
+
+def test_a_fully_weighed_pool_is_not_flagged(ctx, monkeypatch):
+    ctx._llm = ScoutLLM([])
+    stub_search(monkeypatch, {"relevance": [hit("Known", doi="10.1/a",
+                                                citation_count=500)]})
+    res = discover(ctx, "topic", limit=5, use_references=False)
+    assert res.unweighed == 0
+    assert not res.degraded
 
 
 def test_identifiers_from_a_title_match_are_not_adopted(ctx, monkeypatch):

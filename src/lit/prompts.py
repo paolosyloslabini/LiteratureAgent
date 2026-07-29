@@ -166,7 +166,7 @@ def plan_query_prompt(*, query: str, scope: str, this_year: int,
 
     The cheapest call in the tool, and the one that decides what every other
     source is asked. A person types "recent surveys on retrieval-augmented
-    generation, nothing before 2022" — Crossref and OpenAlex have fields for
+    generation, nothing before 2022" — Crossref and Semantic Scholar have fields for
     two thirds of that, but only if someone splits the sentence into a topic, a
     date window and a document type first. Handed the sentence whole, they
     match "recent", "nothing" and "before" as search terms.
