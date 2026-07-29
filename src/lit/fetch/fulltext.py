@@ -158,6 +158,15 @@ def fetch_fulltext(
     if ft is not None:
         return _cache(cache, ft)
 
+    # Every live route failed. A refresh prefers a fresh copy; it should not
+    # refuse the old one when there is no fresh copy to be had. Without this a
+    # `lit reread` with the network down reports no full text while a perfectly
+    # readable PDF sits in the library.
+    if refresh and dest.exists():
+        got = read_pdf(dest)
+        if _usable(got.text, got.pages_read):
+            return _cache(cache, _full(got, "cache-pdf", dest))
+
     return None
 
 
@@ -272,7 +281,7 @@ def _html_candidates(meta: PaperMeta) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     if meta.arxiv_id:
         # arXiv's native HTML (2023+) then ar5iv's LaTeX-derived rendering.
-        out.append((f"https://arxiv.org/abs/{meta.arxiv_id}v1", "arxiv-html"))
+        out.append((f"https://arxiv.org/html/{meta.arxiv_id}v1", "arxiv-html"))
         out.append((f"https://ar5iv.labs.arxiv.org/html/{meta.arxiv_id}", "ar5iv"))
     if meta.pmcid:
         out.append((f"{EUROPEPMC_API}/{meta.pmcid}/fullTextXML", "europepmc-xml"))

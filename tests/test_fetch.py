@@ -5,6 +5,7 @@ from __future__ import annotations
 from lit.actions.inbox import _guess_title, normalize_arxiv_from_header
 from lit.fetch.fulltext import (
     MIN_USABLE_CHARS,
+    _html_candidates,
     dedupe_boilerplate,
     html_to_text,
     strip_appendix,
@@ -255,6 +256,82 @@ def test_guess_title_returns_none_for_junk():
 def test_min_usable_chars_rejects_an_abstract_sized_extraction():
     # A landing page with only an abstract must not count as "read the paper".
     assert len("An abstract of a paper. " * 50) < MIN_USABLE_CHARS
+
+
+# --------------------------------------------------------------------------
+# Text that was within reach
+#
+# Both of these reported "no full text available" while a readable copy was
+# one step away — one on disk, one at a URL a character away from the one asked
+# for.
+# --------------------------------------------------------------------------
+
+class OfflineHttp:
+    """Every network route fails: nothing downloads, nothing answers."""
+
+    def download(self, url, dest, **kw) -> bool:
+        return False
+
+    def get(self, url, **kw):
+        return None
+
+
+def test_a_refresh_falls_back_to_the_pdf_already_in_the_library(tmp_path, monkeypatch):
+    """`lit reread` always refreshes, and must not refuse the stored copy.
+
+    Preferring a fresh copy is the point of `refresh`; refusing an old one when
+    the network is down is not.
+    """
+    from lit.fetch import fulltext as ft_mod
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "k.pdf").write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(
+        ft_mod, "extract_pdf",
+        lambda p, **kw: ft_mod.PdfText("x" * 9000, pages=8, pages_read=8),
+    )
+
+    got = ft_mod.fetch_fulltext(
+        OfflineHttp(), make_meta(), key="k", pdf_dir=pdf_dir,
+        text_dir=tmp_path / "text", refresh=True,
+    )
+    assert got is not None
+    assert got.source == "cache-pdf"
+
+
+def test_the_stored_pdf_never_pre_empts_a_live_fetch(tmp_path, monkeypatch):
+    """A refresh that can reach the network gets the network's copy."""
+    from lit.fetch import fulltext as ft_mod
+
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "k.pdf").write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(
+        ft_mod, "extract_pdf",
+        lambda p, **kw: ft_mod.PdfText("x" * 9000, pages=8, pages_read=8),
+    )
+
+    class ArxivHttp(OfflineHttp):
+        def download(self, url, dest, **kw) -> bool:
+            dest.write_bytes(b"%PDF-1.4 fresh")
+            return True
+
+    got = ft_mod.fetch_fulltext(
+        ArxivHttp(), make_meta(), key="k", pdf_dir=pdf_dir,
+        text_dir=tmp_path / "text", refresh=True,
+    )
+    assert got is not None
+    assert got.source == "arxiv"
+
+
+def test_the_arxiv_html_route_asks_for_html_not_the_abstract_page():
+    """`/abs/` is the abstract landing page; native HTML lives under `/html/`.
+
+    An abstract long enough to clear `_usable()` would be filed as full text.
+    """
+    urls = {label: url for url, label in _html_candidates(make_meta())}
+    assert urls["arxiv-html"] == "https://arxiv.org/html/1706.03762v1"
 
 
 # --------------------------------------------------------------------------
