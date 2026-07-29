@@ -351,3 +351,48 @@ def test_config_set_fallback_round_trips(isolated):
     run("config", "set", "fetch.fallback_url_template", "https://example.org/{doi}")
     fetch = js(run("--json", "config", "show"))["fetch"]
     assert fetch["fallback_url_template"] == "https://example.org/{doi}"
+
+
+# --------------------------------------------------------------------------
+# Cost reporting: every LLM-backed command has to say what it spent.
+# --------------------------------------------------------------------------
+
+def _bill(monkeypatch, amount=0.25, model="claude-sonnet-5", reply=None):
+    """Charge `amount` per json() call and answer from memory — no subprocess."""
+    from lit.llm import ClaudeCLI, LLMResult
+
+    def fake_json(self, prompt, **kw):
+        self.usage.add(LLMResult(text="", cost_usd=amount, model=model))
+        return reply if reply is not None else {"relevant": []}
+
+    monkeypatch.setattr(ClaudeCLI, "available", property(lambda self: True))
+    monkeypatch.setattr(ClaudeCLI, "json", fake_json)
+
+
+def test_search_json_reports_usage(stocked, monkeypatch):
+    _bill(monkeypatch)
+    usage = js(run("--json", "search", "attention"))["usage"]
+    assert "$0.25" in usage and "claude-sonnet-5" in usage
+
+
+def test_search_reports_cost_even_when_ranking_matches_nothing(stocked, monkeypatch):
+    # The ranking call is paid for whether or not it returns anything, so the
+    # empty case must still show the footer.
+    _bill(monkeypatch)
+    out = run("search", "attention").stdout
+    assert "No matching entries" in out
+    assert "$0.25" in out
+
+
+def test_search_raw_reports_usage_key_with_no_spend(stocked):
+    assert js(run("--json", "search", "attention", "--raw"))["usage"] == ""
+
+
+def test_reread_json_reports_usage(stocked):
+    r = run("--json", "reread", "nosuchkey")
+    assert r.exit_code == 1
+    assert js(r)["usage"] == ""
+
+
+def test_inbox_json_reports_usage(stocked):
+    assert js(run("--json", "inbox"))["usage"] == ""

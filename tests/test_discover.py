@@ -2,17 +2,22 @@
 
 The point of the orchestrator is that the pool is built and de-duplicated once,
 before any expensive read happens, so no two workers read the same paper and
-nothing already in the library is proposed again.
+nothing already in the library is proposed again. It is then ranked on
+relevance to the query first and measured importance second.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 from factories import make_entry
 from rich.console import Console
 
+from lit.actions import discover as D
 from lit.actions.context import Ctx
-from lit.actions.discover import discover, mine_references
+from lit.actions.discover import Candidate, discover, mine_references
+from lit.fetch.metadata import PaperMeta
 from lit.models import Reference, slugify
 from lit.runner import run_parallel
 
@@ -22,25 +27,59 @@ def ctx(lib, cfg):
     return Ctx(cfg=cfg, library=lib, console=Console(quiet=True), json_mode=True)
 
 
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Enrichment hits OpenAlex; tests that care stub it explicitly."""
+    monkeypatch.setattr(D, "_lookup_meta", lambda ctx, c: None)
+
+
+def stub_metadata(monkeypatch, by_title: dict):
+    """Give named candidates a citation count / venue, as OpenAlex would."""
+    def fake(ctx, c):
+        spec = by_title.get(c.title)
+        return PaperMeta(**spec) if spec else None
+    monkeypatch.setattr(D, "_lookup_meta", fake)
+
+
+_LISTED = re.compile(r"^ {2}\[(\d+)\] (.+)$", re.M)
+
+
+def _titles_in(prompt: str) -> dict[int, str]:
+    """Recover the titles the ranking prompt listed, with their indices."""
+    out = {}
+    for idx, rest in _LISTED.findall(prompt):
+        title = rest.split(" — ")[0]
+        title = re.sub(r" \(\d{4}\)$", "", title)
+        out[int(idx)] = title
+    return out
+
+
 class ScoutLLM:
-    """Returns a scripted set of papers per angle, and records exclusion lists."""
+    """Scripted papers per angle; records prompts; scores relevance on request.
+
+    `relevance` maps title -> score for the ranking call. Anything unlisted
+    scores 0.9, so a test only has to name the papers it cares about.
+    """
 
     available = True
 
-    def __init__(self, per_angle):
+    def __init__(self, per_angle, relevance: dict | None = None):
         self.per_angle = per_angle
+        self.relevance = relevance or {}
         self.prompts: list[str] = []
+        self.rank_prompts: list[str] = []
         self.calls = 0
 
     def json(self, prompt, **kw):
         self.calls += 1
         self.prompts.append(prompt)
-        if kw.get("role") == "filter":
-            # Keep everything the filter is shown.
-            n = prompt.count("\n  [")
-            return {"keep": [{"index": i, "relevance": 0.9, "why": "fits"}
-                             for i in range(n)]}
-        idx = len(self.prompts) - 1
+        if kw.get("role") == "rank":
+            self.rank_prompts.append(prompt)
+            return {"scores": [
+                {"index": i, "relevance": self.relevance.get(t, 0.9), "why": "fits"}
+                for i, t in _titles_in(prompt).items()
+            ]}
+        idx = len([p for p in self.prompts if "Search from this specific angle" in p]) - 1
         return {"papers": self.per_angle[min(idx, len(self.per_angle) - 1)]}
 
 
@@ -201,6 +240,128 @@ def test_references_can_be_disabled(ctx):
     ctx._llm = ScoutLLM([[paper("From Web")]])
     res = discover(ctx, "t", limit=5, angles=1, use_references=False)
     assert [c.title for c in res.candidates] == ["From Web"]
+
+
+# --------------------------------------------------------------------------
+# Ranking: relevance to the query first, measured importance second
+# --------------------------------------------------------------------------
+
+def test_relevance_outweighs_importance(ctx, monkeypatch):
+    """A celebrated paper that does not answer the question loses to one that does."""
+    ctx._llm = ScoutLLM(
+        [[paper("Famous But Off Topic", year=2015), paper("On Topic And Modest")]],
+        relevance={"Famous But Off Topic": 0.4, "On Topic And Modest": 0.95},
+    )
+    stub_metadata(monkeypatch, {
+        "Famous But Off Topic": {"citation_count": 50_000, "venue": "NeurIPS"},
+    })
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=False)
+    assert [c.title for c in res.candidates][0] == "On Topic And Modest"
+
+
+def test_importance_decides_between_equally_relevant_papers(ctx, monkeypatch):
+    ctx._llm = ScoutLLM([[paper("Well Cited"), paper("Never Cited")]])
+    stub_metadata(monkeypatch, {
+        "Well Cited": {"citation_count": 20_000, "venue": "ICML"},
+    })
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=False)
+    assert [c.title for c in res.candidates] == ["Well Cited", "Never Cited"]
+
+
+def test_off_topic_candidates_are_dropped_not_just_ranked_low(ctx):
+    ctx._llm = ScoutLLM(
+        [[paper("Fits The Query"), paper("Shares Only Vocabulary")]],
+        relevance={"Shares Only Vocabulary": 0.1},
+    )
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=False)
+    assert [c.title for c in res.candidates] == ["Fits The Query"]
+    assert res.dropped_off_topic == 1
+
+
+def test_mined_references_no_longer_automatically_outrank_scouts(ctx):
+    """The old ranking put every co-cited reference above every web result."""
+    for i in range(3):
+        ctx.library.save_entry(make_entry(
+            key=f"e{i}", title=f"Existing {i}", arxiv_id=f"100{i}.0000{i}",
+            references=[Reference(title="Tangential But Co-Cited")],
+        ))
+    ctx._llm = ScoutLLM(
+        [[paper("Exactly What Was Asked")]],
+        relevance={"Tangential But Co-Cited": 0.5, "Exactly What Was Asked": 0.95},
+    )
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=True)
+    assert res.candidates[0].title == "Exactly What Was Asked"
+
+
+def test_every_source_is_scored_by_the_same_call(ctx):
+    for i in range(2):
+        ctx.library.save_entry(make_entry(
+            key=f"e{i}", title=f"Existing {i}", arxiv_id=f"100{i}.0000{i}",
+            references=[Reference(title="From References")],
+        ))
+    llm = ScoutLLM([[paper("From The Web")]])
+    ctx._llm = llm
+    discover(ctx, "topic", limit=5, angles=1, use_references=True)
+    assert len(llm.rank_prompts) == 1
+    listed = set(_titles_in(llm.rank_prompts[0]).values())
+    assert {"From References", "From The Web"} <= listed
+
+
+def test_enrichment_fills_citations_before_the_cut(ctx, monkeypatch):
+    ctx._llm = ScoutLLM([[paper("Measured")]])
+    stub_metadata(monkeypatch, {"Measured": {"citation_count": 1234, "venue": "ICLR"}})
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=False)
+    assert res.candidates[0].citation_count == 1234
+    assert res.candidates[0].venue == "ICLR"
+
+
+def test_identifiers_from_a_title_match_are_not_adopted(ctx, monkeypatch):
+    """A title lookup can land on a re-registration; its DOI must not be reused."""
+    ctx._llm = ScoutLLM([[paper("Attention Is All You Need")]])
+    def fake(_ctx, c):
+        return PaperMeta(citation_count=99, doi="10.9999/wrong", title_matched=True)
+    monkeypatch.setattr(D, "_lookup_meta", fake)
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=False)
+    assert res.candidates[0].citation_count == 99
+    assert res.candidates[0].doi is None
+
+
+def test_ranking_survives_a_failed_relevance_pass(ctx, monkeypatch):
+    from lit.llm import LLMError
+
+    class NoRanking(ScoutLLM):
+        def json(self, prompt, **kw):
+            if kw.get("role") == "rank":
+                raise LLMError("scoring blew up")
+            return super().json(prompt, **kw)
+
+    ctx._llm = NoRanking([[paper("Widely Cited Work"), paper("Never Cited Work")]])
+    stub_metadata(monkeypatch,
+                  {"Widely Cited Work": {"citation_count": 9_000, "venue": "ACL"}})
+    res = discover(ctx, "topic", limit=5, angles=1, use_references=False)
+    assert [c.title for c in res.candidates] == ["Widely Cited Work",
+                                                 "Never Cited Work"]
+    assert all(c.relevance is None for c in res.candidates)
+
+
+def test_recent_papers_are_judged_on_venue_not_on_citations():
+    from datetime import date
+
+    year = date.today().year
+    fresh = Candidate(title="New", year=year, venue="NeurIPS", citation_count=3)
+    older = Candidate(title="Old", year=year - 20, venue="NeurIPS", citation_count=3)
+    assert fresh.world_score == fresh.venue_score
+    assert older.world_score < fresh.world_score
+
+
+def test_a_paper_with_no_metadata_is_middling_not_worthless():
+    assert 0 < Candidate(title="Obscure").importance < 0.5
+
+
+def test_agreement_between_angles_is_a_bonus_not_a_floor():
+    solo = Candidate(title="A", angles=["one"])
+    agreed = Candidate(title="B", angles=["one", "two"])
+    assert agreed.importance > solo.importance
 
 
 # --------------------------------------------------------------------------
