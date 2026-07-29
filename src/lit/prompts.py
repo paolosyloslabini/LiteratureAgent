@@ -389,29 +389,48 @@ DISCOVERY_ANGLES = [
 # Search within the library
 # --------------------------------------------------------------------------
 
-def library_search_prompt(*, query: str, scope: str, entries: list[Entry]) -> str:
-    cards = "\n\n".join(_entry_card(e) for e in entries)
-    schema = {
-        "answer": "string — 2-4 sentences answering the query from these summaries "
-                  "only. Say plainly if they are insufficient.",
-        "relevant": [
-            {
-                "key": "string — the entry key exactly as given",
-                "relevance": "number 0-1",
-                "why": "string — one sentence tying this entry to the query",
-            }
-        ],
-        "gaps": ["string — what the library is missing to answer this properly"],
-    }
+def library_search_prompt(*, query: str, scope: str, entries: list[Entry],
+                          brief: bool = False) -> str:
+    """Rank library entries against a query, and answer from them.
+
+    `brief` is for the caller that only needs the ranking — `lit ask` deciding
+    which papers to open. It asks for no prose answer and shows each entry as a
+    short card, because both the answer and the section summaries that support
+    it are discarded by that caller.
+    """
+    cards = "\n\n".join(_entry_card(e, brief=brief) for e in entries)
+    schema: dict = {}
+    if not brief:
+        schema["answer"] = (
+            "string — 2-4 sentences answering the query from these summaries "
+            "only. Say plainly if they are insufficient."
+        )
+    schema["relevant"] = [
+        {
+            "key": "string — the entry key exactly as given",
+            "relevance": "number 0-1",
+            "why": "string — one sentence tying this entry to the query",
+        }
+    ]
+    if not brief:
+        schema["gaps"] = [
+            "string — what the library is missing to answer this properly"
+        ]
+
+    task = (
+        "Decide which are genuinely relevant. These will be opened and read in "
+        "full, so judge only whether each one bears on the query."
+        if brief else
+        "Decide which are genuinely relevant, and give a short answer based on "
+        "them.\n\nThis answer is drawn from summaries, not full papers, so keep "
+        "it at the level the summaries actually support and do not overstate."
+    )
     return "\n".join([
         f"Library scope: {scope!r}" if scope else "",
         f"Query: {query!r}",
         "",
         "Below are candidate entries from the library, as their stored summaries.",
-        "Decide which are genuinely relevant, and give a short answer based on them.",
-        "",
-        "This answer is drawn from summaries, not full papers, so keep it at the "
-        "level the summaries actually support and do not overstate.",
+        task,
         "Rank by real relevance, and drop entries that merely share vocabulary.",
         "",
         cards,
@@ -602,9 +621,20 @@ def _snippet(text: str, limit: int) -> str:
     return (head if sep and len(head) > limit * 0.6 else cut) + "…"
 
 
-def _entry_card(e: Entry) -> str:
-    findings = "\n".join(f"    - {f}" for f in e.key_findings[:5])
-    sections = "\n".join(
+def _entry_card(e: Entry, *, brief: bool = False) -> str:
+    """One library entry, as the ranking call sees it.
+
+    The full card carries the stored section summaries, which are most of its
+    weight — they are what lets a caller answer a question from summaries
+    alone. A `brief` card drops them, because deciding whether a paper bears on
+    a query is a judgement the one-liner, tags and findings already support,
+    and a pool of thirty full cards is the largest prompt this tool builds
+    outside of reading a paper.
+    """
+    limit = 3 if brief else 5
+    findings = "\n".join(f"    - {_snippet(f, 160) if brief else f}"
+                         for f in e.key_findings[:limit])
+    sections = "" if brief else "\n".join(
         f"    {s.name}: {s.summary[:300]}" for s in e.sections[:12]
     )
     # An entry filed but not yet read has no agent-written summary, only the
@@ -613,7 +643,8 @@ def _entry_card(e: Entry) -> str:
     # someone pays to read it.
     stand_in = ""
     if not e.one_liner and e.abstract.strip():
-        stand_in = f"  Abstract (not yet read): {_snippet(e.abstract, 600)}"
+        stand_in = ("  Abstract (not yet read): "
+                    f"{_snippet(e.abstract, 240 if brief else 600)}")
     return "\n".join(filter(None, [
         f"[{e.key}] {e.title} — {e.citation()} (level {e.level}, {e.type})",
         f"  One-liner: {e.one_liner or '(none — not read yet)'}",
@@ -621,5 +652,5 @@ def _entry_card(e: Entry) -> str:
         f"  Tags: {', '.join(e.tags)}" if e.tags else "",
         f"  Key findings:\n{findings}" if findings else "",
         f"  Sections:\n{sections}" if sections else "",
-        f"  User notes: {e.notes[:500]}" if e.notes.strip() else "",
+        f"  User notes: {e.notes[:500]}" if not brief and e.notes.strip() else "",
     ]))
