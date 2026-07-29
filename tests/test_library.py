@@ -65,6 +65,18 @@ def test_delete_entry(lib, entry):
     assert not lib.delete_entry(entry.key)
 
 
+def test_delete_entry_takes_the_downloaded_artifacts_with_it(lib, entry):
+    lib.save_entry(entry)
+    pdf = lib.pdfs_dir / f"{entry.key}.pdf"
+    text = lib.text_dir / f"{entry.key}.txt"
+    pdf.write_bytes(b"%PDF-1.4")
+    text.write_text("full text", encoding="utf-8")
+
+    assert lib.delete_entry(entry.key)
+    assert not pdf.exists()
+    assert not text.exists()
+
+
 def test_unique_key_disambiguates(lib, entry):
     lib.save_entry(entry)
     assert lib.unique_key(entry.key) == entry.key + "a"

@@ -14,7 +14,7 @@ from factories import make_entry
 from lit.actions.add import AddResult
 from lit.config import Config
 from lit.models import STATUS_UNREAD
-from lit.tui import BrowserApp, ConfirmRead
+from lit.tui import BrowserApp, ConfirmDelete, ConfirmRead
 
 
 @pytest.fixture
@@ -328,6 +328,94 @@ async def test_the_row_stays_selected_across_a_reload(app):
         app.action_reload()
         await pilot.pause()
         assert app.current().key == "doe2010obscure"
+
+
+# --------------------------------------------------------------------------
+# Deleting
+# --------------------------------------------------------------------------
+
+async def test_delete_asks_first_and_removes_the_entry(app, stocked):
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#table").move_cursor(row=1)
+        await pilot.pause()
+        assert app.current().key == "doe2010obscure"
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmDelete)
+
+        await pilot.press("y")
+        await pilot.pause()
+        assert not stocked.has("doe2010obscure")
+        assert [e.key for e in app.shown] == ["vaswani2017attention"]
+
+
+async def test_cancelling_the_prompt_deletes_nothing(app, stocked):
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmDelete)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(stocked) == 2
+        assert len(app.shown) == 2
+
+
+async def test_enter_does_not_confirm_a_delete(app, stocked):
+    """`enter` is a navigation key here — it must not be able to delete."""
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmDelete)
+        assert len(stocked) == 2
+
+
+async def test_delete_leaves_the_cursor_where_the_row_was(app, stocked):
+    """Working down a backlog shouldn't throw the cursor back to the top."""
+    stocked.save_entry(make_entry(key="zeta2020last", title="Zeta", year=2020,
+                                  level="C", arxiv_id=None, sections=[],
+                                  references=[]))
+    async with app.run_test() as pilot:
+        app.action_reload()
+        await pilot.pause()
+        app.query_one("#table").move_cursor(row=1)
+        await pilot.pause()
+        doomed = app.current().key
+
+        app.action_delete_entry()
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert doomed not in [e.key for e in app.shown]
+        assert app.current() is app.shown[1]
+
+
+async def test_an_entry_being_read_is_not_deleted_underneath_the_reader(app, stocked):
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.reading.add(app.current().key)
+        app.action_delete_entry()
+        await pilot.pause()
+        assert not isinstance(app.screen, ConfirmDelete)
+        assert len(stocked) == 2
+
+
+def test_the_delete_prompt_says_when_notes_go_with_it(stocked):
+    """Notes are the one thing in an entry the user wrote themselves."""
+    from lit import entryfile
+
+    assert "Your notes" not in ConfirmDelete(stocked.get("doe2010obscure")).body_text()
+
+    entryfile.set_notes(stocked.entry_path("doe2010obscure"),
+                        "Worth revisiting for the widget benchmark.")
+    assert "Your notes" in ConfirmDelete(stocked.get("doe2010obscure")).body_text()
 
 
 # --------------------------------------------------------------------------

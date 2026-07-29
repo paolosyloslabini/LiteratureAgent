@@ -877,28 +877,49 @@ def cmd_note(
         console.print(f"[green]saved[/green] notes on [cyan]{key}[/cyan]")
 
 
-@app.command("rm")
-def cmd_rm(
-    key: str = typer.Argument(...),
-    yes: bool = typer.Option(False, "--yes", "-y"),
+@app.command("delete")
+@app.command("rm", hidden=True)
+def cmd_delete(
+    keys: list[str] = typer.Argument(..., help="Entry keys to delete."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Delete without asking."),
 ):
-    """Delete an entry."""
+    """Delete entries: the record, its PDF and its cached text. Also `lit rm`.
+
+    Nothing is deleted until every key resolves, so one typo in a batch cannot
+    take the rest of it with it. Your notes are part of the record and go too,
+    which is why an entry carrying them is called out before the prompt.
+    """
     lib = _lib()
-    entry = lib.get(key)
-    if entry is None:
-        _fail(f"no entry with key {key!r}")
-    if entry.notes.strip() and not (yes or state.yes):
-        console.print(f"[yellow]{key} has your notes on it.[/yellow]")
+    entries: list[Entry] = []
+    missing: list[str] = []
+    for k in keys:
+        entry = lib.get(k)
+        if entry is None:
+            missing.append(k)
+        else:
+            entries.append(entry)
+    if missing:
+        _fail(f"no entry with key(s): {', '.join(missing)}")
+
+    noted = [e for e in entries if e.notes.strip()]
+    if noted and not state.json_mode:
+        console.print(
+            "[yellow]Your notes will go too:[/yellow] "
+            + ", ".join(e.key for e in noted)
+        )
+    # --json means nobody is at the terminal to answer, so it does not prompt.
     if not (yes or state.yes or state.json_mode):
-        if not typer.confirm(f"Delete {key} ({entry.title[:60]})?"):
+        for e in entries:
+            console.print(f"  [cyan]{e.key}[/cyan]  {e.title[:70]}")
+        what = "1 entry" if len(entries) == 1 else f"{len(entries)} entries"
+        if not typer.confirm(f"Delete {what}?"):
             raise typer.Exit(0)
-    lib.delete_entry(key)
-    (lib.pdfs_dir / f"{key}.pdf").unlink(missing_ok=True)
-    (lib.text_dir / f"{key}.txt").unlink(missing_ok=True)
+
+    deleted = [e.key for e in entries if lib.delete_entry(e.key)]
     if state.json_mode:
-        _emit({"deleted": key})
+        _emit({"deleted": deleted})
     else:
-        console.print(f"[green]deleted[/green] {key}")
+        console.print(f"[green]deleted[/green] {', '.join(deleted)}")
 
 
 @app.command("reindex")

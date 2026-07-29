@@ -82,7 +82,8 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit read` | read filed papers in full and write their summaries |
 | `lit inbox` | adopt PDFs you dropped in `pdfs/inbox/` |
 | `lit refresh` | re-fetch citations, references and venues (no LLM) |
-| `lit ls` / `show` / `note` / `rm` | browse and annotate |
+| `lit ls` / `show` / `note` | browse and annotate |
+| `lit delete` | remove entries, their PDFs and their cached text (`lit rm`) |
 | `lit abstract` | print an entry's abstract, ready to pipe |
 | `lit search` | find in-library sources (fast, from summaries) |
 | `lit ask` | answer a question by reading the actual papers |
@@ -305,10 +306,16 @@ way to work through a backlog.
 | `R` | read this paper — `lit read <key>`, after a confirmation |
 | `o` / `c` | open the paper / its code repository in a browser |
 | `n` | edit your notes (saved exactly as `lit note` saves them) |
+| `d` | delete this entry — `lit delete <key>`, after a confirmation |
 | `/` `f` `s` `r` | search · filter · sort · reload |
 
 A read started with `R` runs in the background: the browser stays usable, the
 row shows `reading…`, and the cost lands in a notification when it finishes.
+
+`d` deletes the same things `lit delete` does, and cannot be undone, so it asks
+first — saying so out loud when the entry carries notes you wrote. It declines
+while a read is still running, and leaves the cursor where the row was so you
+can work down a backlog without scrolling back each time.
 
 Links open in the browser you actually look at. Under WSL that means the
 Windows side — Chrome if it is installed, otherwise the Windows default
