@@ -319,11 +319,16 @@ class Store:
 # FTS5 query construction
 # --------------------------------------------------------------------------
 
+# Only words that carry no meaning anywhere belong here. A word listed here is
+# not merely down-weighted, it is deleted from the query, so anything that is
+# ordinary English in a question but load-bearing in a technical term makes that
+# term unsearchable: "state" and "current" were here until they turned
+# 'state space models' into '"space" OR "models"'.
 _STOPWORDS = {
     "a", "an", "the", "of", "in", "on", "for", "and", "or", "to", "is", "are",
     "what", "which", "how", "does", "do", "can", "with", "by", "from", "at",
     "be", "been", "was", "were", "that", "this", "these", "those", "it", "its",
-    "as", "we", "you", "i", "about", "current", "state", "into", "there", "s",
+    "as", "we", "you", "i", "about", "into", "there", "s",
 }
 
 
