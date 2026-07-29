@@ -263,7 +263,6 @@ def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
         "papers": [
             {
                 "title": "string — the exact published title",
-                "authors": ["string"],
                 "year": "number|null",
                 "venue": "string|null — the venue acronym or journal name",
                 "doi": "string|null — bare DOI, e.g. 10.1145/3292500.3330701",
@@ -486,7 +485,6 @@ def extract_evidence_prompt(*, question: str, entry: Entry, truncated: bool) -> 
             {
                 "text": "string — copied VERBATIM from the document, 1-3 sentences",
                 "section": "string|null — which section it came from",
-                "supports": "string — what point this quote establishes",
             }
         ],
         "caveats": ["string — limitations of this evidence: scope, scale, "
@@ -576,7 +574,6 @@ def claim_origin_prompt(*, claim: str, entry: Entry, references: list,
             {
                 "index": "number — the [i] index from the reference list below",
                 "confidence": "number 0-1",
-                "why": "string — the citation context that points here",
             }
         ],
         "reasoning": "string — two sentences on how you decided",
@@ -615,11 +612,8 @@ def find_claim_source_prompt(*, claim: str, scope: str) -> str:
         "papers": [
             {
                 "title": "string",
-                "authors": ["string"],
-                "year": "number|null",
                 "doi": "string|null",
                 "arxiv_id": "string|null",
-                "why": "string — why this paper is a good place to start tracing",
             }
         ]
     }
@@ -670,8 +664,6 @@ def find_code_prompt(*, title: str, authors: list[str], year: int | None,
                     "repository to THIS paper, quoted from the page. Say where "
                     "you saw it (repo README, arXiv page, project site).",
         "confidence": "string — high, medium or low",
-        "searched": ["string — a query or URL you actually tried, so a failed "
-                     "search says what was already ruled out"],
     }
 
     return "\n".join(filter(None, [

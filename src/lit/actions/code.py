@@ -20,7 +20,7 @@ printed in their paper.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..llm import LLMError
 from ..models import CODE_FROM_WEB, Entry, normalize_code_url
@@ -52,7 +52,6 @@ class CodeResult:
     confidence: str = ""
     evidence: str = ""
     message: str = ""
-    searched: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -63,7 +62,7 @@ class CodeResult:
             "key": self.key, "title": self.title, "status": self.status,
             "code_url": self.code_url, "official": self.official,
             "confidence": self.confidence, "evidence": self.evidence,
-            "message": self.message, "searched": self.searched,
+            "message": self.message,
         }
 
 
@@ -163,7 +162,6 @@ def _search_one(ctx: Ctx, entry: Entry, *, unofficial: bool,
         res.message = str(exc)
         return res
 
-    res.searched = [str(s) for s in (data.get("searched") or []) if str(s).strip()][:8]
     res.evidence = str(data.get("evidence") or "").strip()
     res.confidence = str(data.get("confidence") or "").strip().lower()
     # A scout that says nothing about who released it has not confirmed an

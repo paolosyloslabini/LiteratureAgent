@@ -35,7 +35,6 @@ from .search import search
 class Quote:
     text: str
     section: str | None = None
-    supports: str = ""
 
 
 @dataclass
@@ -54,7 +53,7 @@ class Evidence:
             "citation": self.entry.citation(),
             "summary": self.summary,
             "quotes": [
-                {"text": q.text, "section": q.section, "supports": q.supports}
+                {"text": q.text, "section": q.section}
                 for q in self.quotes
             ],
             "caveats": self.caveats,
@@ -97,7 +96,7 @@ class AskResult:
                     "relevant": ev.relevant,
                     "summary": ev.summary,
                     "quotes": [
-                        {"text": q.text, "section": q.section, "supports": q.supports}
+                        {"text": q.text, "section": q.section}
                         for q in ev.quotes
                     ],
                     "caveats": ev.caveats,
@@ -192,7 +191,6 @@ def ask(
                 text=qt,
                 section=(str(q.get("section")).strip() or None)
                 if q.get("section") else None,
-                supports=str(q.get("supports") or "").strip(),
             ))
         return Evidence(
             entry=entry,

@@ -25,7 +25,6 @@ FOUND = {
     "official": True,
     "evidence": "the README says 'code for Attention Is All You Need'",
     "confidence": "high",
-    "searched": ["attention is all you need github"],
 }
 
 
