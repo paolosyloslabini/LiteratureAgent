@@ -429,11 +429,94 @@ _REF_HEADING = re.compile(
     r"\s*:?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
-# A cut is only made when this much of the document still survives it. That is
-# the whole safety story: a stray "References" line in a table of contents sits
-# near the front, so cutting there would leave almost nothing and is refused,
-# while a real bibliography leaves the paper intact behind it.
-_REF_MIN_KEPT = 0.3
+# Headings that begin the back matter, with whatever follows on the line so the
+# caller can check it reads as a title. Anchoring to the start of a line is not
+# enough on its own: extraction wraps prose freely, so "...is analysed in\n
+# Appendix A.1, where we verify..." puts a cross-reference exactly where a
+# heading would be. What separates them is what comes next — a title, or the
+# rest of a sentence.
+_APPENDIX_HEADING = re.compile(
+    r"^[ \t]*(?:appendix|appendices"
+    r"|supplement(?:ary|al)\s+(?:material|information|results|details))"
+    r"(?:[ \t]+[A-Za-z0-9][\w.]*)?"     # an optional label: A, B.2, 1
+    r"[ \t]*[:.\-–—]?[ \t]*(?P<rest>.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+# A heading this early is front matter, not back matter — a table of contents
+# listing "References", or a preface. Content still has to agree (see
+# `_is_bibliography`); this only keeps the search away from the obvious traps.
+_MIN_HEADING_POS = 0.05
+_MIN_APPENDIX_POS = 0.20
+
+# What a reference entry is made of: a year, a numbered marker, an "et al.", a
+# DOI or arXiv id, a venue word. Prose uses these too, but not at this rate —
+# a bibliography carries several per entry and an entry is only a line or two
+# long. Counting them per 1000 characters is what tells a real reference list
+# from the word "References" appearing on a line of its own somewhere it does
+# not mean the bibliography.
+_BIB_MARKER = re.compile(
+    r"\b(?:19|20)\d{2}\b"                       # a publication year
+    r"|^\s*\[\d{1,3}\]|^\s*\(\d{1,3}\)"         # [12] / (12) entry markers
+    r"|\bet\s+al\b"
+    r"|\barXiv\b|\bdoi\b|\bdoi\.org|https?://"
+    r"|\bpp\.\s*\d|\bvol\.\s*\d"
+    r"|\bIn\s+Proc|\bProceedings\b|\bJournal\b|\bConference\b|\bpreprint\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+_BIB_DENSITY = 2.0
+_BIB_PROBE_CHARS = 6000
+_BIB_WINDOW = 1500
+
+
+def _heading_continues_a_sentence(rest: str) -> bool:
+    """Is this line a back-matter heading, or a sentence that mentions one?
+
+    A heading is followed by a title or by nothing. A cross-reference is
+    followed by the rest of its sentence, which starts in lower case or on the
+    punctuation that resumes it.
+    """
+    rest = rest.strip()
+    if not rest:
+        return False
+    return not (rest[0].isupper() or rest[0].isdigit())
+
+
+def _find_appendix(text: str, start: int = 0) -> int | None:
+    """Offset of the real back-matter heading at or after `start`."""
+    for m in _APPENDIX_HEADING.finditer(text, start):
+        if not _heading_continues_a_sentence(m.group("rest")):
+            return m.start()
+    return None
+
+
+def _marker_density(text: str) -> float:
+    """Bibliographic markers per 1000 characters."""
+    return (len(_BIB_MARKER.findall(text)) / len(text) * 1000) if text else 0.0
+
+
+def _is_bibliography(text: str) -> bool:
+    """Does the text right after a heading read as a list of references?"""
+    return _marker_density(text[:_BIB_PROBE_CHARS]) >= _BIB_DENSITY
+
+
+def _bibliography_end(text: str, start: int) -> int:
+    """Where the reference list that begins at `start` stops.
+
+    Ends at the back matter if the paper has any, otherwise where the column of
+    years thins out — which is how a bibliography followed by unlabelled
+    appendix content is found.
+    """
+    app = _find_appendix(text, start)
+    limit = app if app is not None else len(text)
+    pos = start
+    while pos < limit:
+        window = text[pos:min(pos + _BIB_WINDOW, limit)]
+        if _marker_density(window) < _BIB_DENSITY / 2:
+            return pos
+        pos += _BIB_WINDOW
+    return limit
 
 
 def strip_reference_list(text: str) -> tuple[str, int]:
@@ -444,25 +527,118 @@ def strip_reference_list(text: str) -> tuple[str, int]:
     it, and every command that needs the citations gets them as structured data
     from the metadata APIs instead. Cutting it before the text is sent is the
     single cheapest saving available on a read.
+
+    Only the list itself goes. What follows it — an appendix, and on most recent
+    papers that is the majority of the file — is left for the caller to decide
+    about, because a summary does not need it but a quote hunt might. This used
+    to cut to the end of the document, and refused to cut at all unless 30% of
+    the file survived; on a paper whose bibliography starts at 25% and whose
+    appendix fills the rest, that refusal sent the whole thing.
     """
     if not text:
         return text, 0
-    floor = len(text) * _REF_MIN_KEPT
-    # The last qualifying heading, not the first: an appendix can follow the
-    # bibliography, and a book repeats the heading once per chapter. Taking the
-    # last one errs toward cutting less.
-    cut = None
+
+    floor = len(text) * _MIN_HEADING_POS
+    spans: list[tuple[int, int]] = []
     for m in _REF_HEADING.finditer(text):
-        if m.start() >= floor:
-            cut = m.start()
-    if cut is None:
+        if m.start() < floor:
+            continue
+        if spans and m.start() < spans[-1][1]:
+            continue  # inside a list already claimed
+        if not _is_bibliography(text[m.end():]):
+            continue
+        spans.append((m.start(), _bibliography_end(text, m.end())))
+
+    if not spans:
         return text, 0
-    kept = text[:cut].rstrip()
-    return kept + "\n\n[... reference list omitted ...]", len(text) - len(kept)
+
+    out, prev, removed = [], 0, 0
+    for start, end in spans:
+        out.append(text[prev:start].rstrip())
+        out.append("\n\n[... reference list omitted ...]\n\n")
+        removed += end - start
+        prev = end
+    out.append(text[prev:])
+    kept = "".join(out).rstrip()
+    return kept, len(text) - len(kept)
+
+
+def strip_appendix(text: str) -> tuple[str, int]:
+    """Drop the back matter. Returns the text and chars removed.
+
+    On a current machine-learning paper the appendix is routinely longer than
+    the paper: prompts, hyperparameter tables, per-task breakdowns. A reader
+    writing a library card does not need any of it — asked to work section by
+    section it will faithfully summarize "Appendix F: In-Depth Analysis" at the
+    same length as the method — so the summary paths drop it. The paths that go
+    looking for evidence keep it, because a result table is exactly the kind of
+    thing a question turns out to hang on.
+    """
+    if not text:
+        return text, 0
+    at = _find_appendix(text, int(len(text) * _MIN_APPENDIX_POS))
+    if at is None:
+        return text, 0
+    kept = text[:at].rstrip()
+    return kept + "\n\n[... appendix omitted ...]", len(text) - len(kept)
+
+
+# A line repeated at least this many times, short enough to be furniture rather
+# than prose, is a running header or footer stamped on every page.
+_BOILER_MIN_REPEATS = 4
+_BOILER_MAX_WORDS = 14
+_BOILER_MAX_CHARS = 120
+# Never let this eat a real document, however odd its typesetting. Across the
+# 38 papers this was measured on, the most any one of them lost to running
+# furniture was 8.5%, so this sits well clear of the honest cases while still
+# refusing to act on a file that is mostly one repeated line.
+_BOILER_MAX_SHARE = 0.25
+_HAS_WORD = re.compile(r"[A-Za-z]{3}")
+
+
+def dedupe_boilerplate(text: str) -> tuple[str, int]:
+    """Drop per-page furniture. Returns the text and chars removed.
+
+    PDF extraction stamps the running header, the footer and the arXiv spine
+    onto every page: "Preprint. Under review.", "Published as a conference
+    paper at ICLR 2024". On a 40-page document that is the same sentence forty
+    times. Lines without letters are left alone, so a column of repeated numbers
+    in a table survives.
+    """
+    if not text:
+        return text, 0
+    lines = text.split("\n")
+    counts: dict[str, int] = {}
+    for line in lines:
+        s = line.strip()
+        if (s and len(s) <= _BOILER_MAX_CHARS and len(s.split()) <= _BOILER_MAX_WORDS
+                and _HAS_WORD.search(s)):
+            counts[s] = counts.get(s, 0) + 1
+
+    drop = {s for s, n in counts.items() if n >= _BOILER_MIN_REPEATS}
+    if not drop:
+        return text, 0
+    would_remove = sum(len(s) * (n - 1) for s, n in counts.items() if s in drop)
+    if would_remove > len(text) * _BOILER_MAX_SHARE:
+        return text, 0
+
+    # The first occurrence stays: on many papers the running header is the only
+    # place the venue is printed, and the reader is asked to recover it.
+    kept, seen = [], set()
+    for line in lines:
+        s = line.strip()
+        if s in drop:
+            if s in seen:
+                continue
+            seen.add(s)
+        kept.append(line)
+    out = "\n".join(kept)
+    return out, len(text) - len(out)
 
 
 def truncate_for_llm(text: str, max_chars: int = 400_000, *,
-                     drop_references: bool = False) -> tuple[str, bool]:
+                     drop_references: bool = False,
+                     drop_appendix: bool = False) -> tuple[str, bool]:
     """Fit a paper into a prompt, keeping the head and tail if it is huge.
 
     The head carries abstract/intro/method; the tail carries results and
@@ -471,9 +647,17 @@ def truncate_for_llm(text: str, max_chars: int = 400_000, *,
     `drop_references` removes the paper's own bibliography first, so the budget
     is spent on the parts a reader is actually asked about. It is off by default
     because claim tracing reads citation context and wants it left in place.
+
+    `drop_appendix` additionally removes the back matter, for the callers
+    writing a summary rather than hunting for a quote. Per-page furniture goes
+    whenever either is set — nothing asks to be told the running header twice.
     """
     if drop_references:
         text, _ = strip_reference_list(text)
+    if drop_appendix:
+        text, _ = strip_appendix(text)
+    if drop_references or drop_appendix:
+        text, _ = dedupe_boilerplate(text)
     if len(text) <= max_chars:
         return text, False
     head = int(max_chars * 0.7)

@@ -5,7 +5,9 @@ from __future__ import annotations
 from lit.actions.inbox import _guess_title, normalize_arxiv_from_header
 from lit.fetch.fulltext import (
     MIN_USABLE_CHARS,
+    dedupe_boilerplate,
     html_to_text,
+    strip_appendix,
     strip_reference_list,
     truncate_for_llm,
 )
@@ -86,12 +88,24 @@ def test_reference_list_is_dropped():
     assert out.endswith("[... reference list omitted ...]")
 
 
+def _bib_lines(n: int = 200) -> str:
+    """Entries that read like references, because that is what is detected.
+
+    A heading alone is not evidence: the same word appears in contents pages and
+    in running text, so what follows it has to look like a reference list.
+    """
+    return "\n".join(
+        f"[{i}] A Author et al. A paper title. In Proceedings, 20{10 + i % 15}."
+        for i in range(n)
+    )
+
+
 def test_bibliography_and_works_cited_headings_are_recognized():
     for heading in ("Bibliography", "WORKS CITED", "7. References"):
-        text = _paper("Body. " * 400, f"\n{heading}\n\n" + "Ref line.\n" * 200)
+        text = _paper("Body. " * 400, f"\n{heading}\n\n" + _bib_lines())
         out, removed = strip_reference_list(text)
         assert removed > 0, heading
-        assert "Ref line." not in out, heading
+        assert "A paper title." not in out, heading
 
 
 def test_a_paper_with_no_reference_list_is_left_alone():
@@ -114,12 +128,12 @@ def test_an_early_heading_does_not_take_the_body_with_it():
 
 
 def test_truncate_only_drops_references_when_asked():
-    refs = "\nReferences\n\n" + "Ref line.\n" * 300
+    refs = "\nReferences\n\n" + _bib_lines(300)
     text = _paper("Body. " * 400, refs)
     kept, _ = truncate_for_llm(text, 1_000_000)
-    assert "Ref line." in kept
+    assert "A paper title." in kept
     dropped, _ = truncate_for_llm(text, 1_000_000, drop_references=True)
-    assert "Ref line." not in dropped
+    assert "A paper title." not in dropped
 
 
 # --------------------------------------------------------------------------
@@ -492,3 +506,97 @@ def test_resolve_falls_back_to_a_title_search_with_no_identifier(monkeypatch):
 
     assert meta.citation_count == 77
     assert meta.doi is None  # the mirror's DOI was not adopted
+
+
+# --------------------------------------------------------------------------
+# What a reading prompt should not have to carry
+#
+# These numbers come from the 38 papers in the author's own libraries. The old
+# rule refused to cut unless 30% of the file survived, which on a paper whose
+# bibliography starts at 25% and whose appendix fills the rest meant sending the
+# whole thing. Detection is by content now, so position is not the deciding vote.
+# --------------------------------------------------------------------------
+
+def test_a_bibliography_a_quarter_of_the_way_in_is_still_cut():
+    """The shape that defeated the old positional rule."""
+    body = "Method. " * 300                     # ~2.4k chars
+    text = f"Abstract\n\n{body}\n\nReferences\n\n{_bib_lines(400)}"
+    assert len(body) < len(text) * 0.30         # the old floor would refuse
+    out, removed = strip_reference_list(text)
+    assert removed > 0
+    assert "Method." in out and "A paper title." not in out
+
+
+def test_the_appendix_survives_a_reference_cut():
+    """`ask` needs it: the evidence for a question is often a table back there."""
+    text = ("Abstract\n\nBody. " * 200 + "\nReferences\n\n" + _bib_lines(200)
+            + "\n\nAppendix A Extra Results\n\nThe held-out split scores 41.2.")
+    out, _ = strip_reference_list(text)
+    assert "A paper title." not in out
+    assert "The held-out split scores 41.2." in out
+
+
+def test_the_appendix_goes_when_asked():
+    text = ("Abstract\n\nBody. " * 300
+            + "\n\nAppendix A Extra Results\n\nThe held-out split scores 41.2.")
+    out, removed = strip_appendix(text)
+    assert removed > 0
+    assert "Body." in out
+    assert "41.2" not in out
+    assert out.endswith("[... appendix omitted ...]")
+
+
+def test_a_sentence_pointing_at_an_appendix_is_not_the_appendix():
+    """Extraction wraps prose, so a cross-reference lands where a heading would.
+
+    This cost a real paper 80% of its body before it was caught.
+    """
+    text = ("Abstract\n\nBody. " * 200
+            + "\nwe provide a contamination analysis in\n"
+            + "Appendix A.1, where we verify performance on a stricter subset.\n"
+            + "Body continues. " * 200)
+    out, removed = strip_appendix(text)
+    assert removed == 0
+    assert "Body continues." in out
+
+
+def test_an_appendix_heading_in_the_opening_pages_is_ignored():
+    text = "Appendix A Overview\n\n" + "Body. " * 500
+    out, removed = strip_appendix(text)
+    assert removed == 0 and out == text
+
+
+def test_running_headers_are_stamped_once_not_forty_times():
+    page = ("Published as a conference paper at ICLR 2024\n"
+            + "Some real content on this page. " * 40 + "\n")
+    out, removed = dedupe_boilerplate(page * 40)
+    assert removed > 0
+    assert out.count("Published as a conference paper at ICLR 2024") == 1
+    # The venue is often only printed in the running head, and the reader is
+    # asked to recover it, so the first one stays.
+    assert "ICLR 2024" in out
+    assert out.count("Some real content on this page.") == 40 * 40
+
+
+def test_repeated_numbers_in_a_table_are_left_alone():
+    table = "0.00\n0.00\n0.00\n0.00\n0.00\n0.00\n"
+    out, removed = dedupe_boilerplate(table)
+    assert removed == 0 and out == table
+
+
+def test_boilerplate_never_eats_the_document():
+    """A pathological file must lose nothing rather than lose everything."""
+    text = "Repeated line.\n" * 500
+    out, removed = dedupe_boilerplate(text)
+    assert removed == 0 and out == text
+
+
+def test_the_summary_path_drops_more_than_the_evidence_path():
+    text = ("Abstract\n\nBody. " * 300 + "\nReferences\n\n" + _bib_lines(300)
+            + "\n\nAppendix A Extra Results\n\nHeld-out split scores 41.2.")
+    summary, _ = truncate_for_llm(text, 1_000_000, drop_references=True,
+                                  drop_appendix=True)
+    evidence, _ = truncate_for_llm(text, 1_000_000, drop_references=True)
+    assert len(summary) < len(evidence) < len(text)
+    assert "41.2" in evidence and "41.2" not in summary
+    assert "A paper title." not in evidence

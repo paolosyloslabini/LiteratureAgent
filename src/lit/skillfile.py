@@ -114,6 +114,14 @@ lit read --all --level A -n 5 --json         # or work through the backlog
 - `read` is the expensive step, bought per paper. Run it on the entries that
   actually matter rather than on everything `find` returned. `find --read` does
   it inline instead, and costs accordingly.
+- A paper already read in another library under the same root is not read again:
+  its summaries are copied and the message says which library they came from.
+  That is expected, not a failure — use `--refresh` if you want a fresh reading
+  written against this library's scope.
+- A reading covers the paper, not its back matter: the bibliography and the
+  appendices are dropped before the reader sees them, and sections are recorded
+  at top level. `lit ask` still reads the appendix, because evidence for a
+  specific question often sits in a table there.
 - `find --parallel` adds LLM scout agents to the free search. It finds work
   keyword search misses — adjacent fields, negative results — and costs real
   tokens. Use it when the free search came back thin, not by default.

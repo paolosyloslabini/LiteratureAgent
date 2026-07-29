@@ -67,6 +67,28 @@ DEFAULT_ROLE_MODELS: dict[str, str] = {
     "synthesis": "sonnet",
 }
 
+# Per-role reasoning effort, and the reason `lit` always states one.
+#
+# The `claude` CLI inherits `effortLevel` from the user's own settings.json when
+# no `--effort` is given. That setting is chosen for interactive work, and on a
+# batch of paper reads it is silently expensive: at `xhigh` the reader spent
+# 8,010 output tokens on a paper that `medium` recorded just as faithfully in
+# 1,921 — the same headline finding, five top-level sections instead of ten
+# sub-sections, for 36% less. None of these calls is a reasoning problem. They
+# read a document and fill in fields, so `lit` names the effort it wants rather
+# than inheriting one that was never chosen for this.
+DEFAULT_ROLE_EFFORT: dict[str, str] = {
+    "plan": "low",       # extracting search parameters from one sentence
+    "scout": "low",      # many shallow calls
+    "filter": "low",
+    "rank": "low",
+    "reader": "medium",  # the quality step, but still comprehension not reasoning
+    "analyst": "medium",  # quotes must be exact, so not `low`
+    "synthesis": "medium",
+}
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 
 @dataclass
 class LLMConfig:
@@ -77,6 +99,13 @@ class LLMConfig:
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_ROLE_MODELS))
     # Set by `--model` to force one model for every role in a single command.
     override_model: str = ""
+    # Fallback effort for any role not named in `efforts`. Set to "" to pass no
+    # --effort at all and go back to inheriting the CLI's own setting.
+    effort: str = "medium"
+    # Per-role overrides; see DEFAULT_ROLE_EFFORT above.
+    efforts: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_ROLE_EFFORT))
+    # Set by `--effort` to force one level for every role in a single command.
+    override_effort: str = ""
     # Reading a full paper is the expensive step; keep a generous ceiling.
     timeout_s: int = 900
     # How many papers to read concurrently in `find` / `ask`.
@@ -97,6 +126,14 @@ class LLMConfig:
         if role and self.models.get(role):
             return self.models[role]
         return self.model
+
+    def effort_for(self, role: str | None) -> str:
+        """The reasoning effort for a role, or "" to let the CLI decide."""
+        if self.override_effort:
+            return self.override_effort
+        if role and self.efforts.get(role):
+            return self.efforts[role]
+        return self.effort
 
 
 @dataclass
@@ -175,12 +212,16 @@ def load_config(path: Path | None = None) -> Config:
         cfg.root = str(raw.get("root") or cfg.root)
         cfg.default_library = str(raw.get("default_library") or "")
         llm_raw = dict(raw.get("llm") or {})
-        # `models` is merged into the defaults, so naming one role doesn't wipe
-        # the rest.
+        # `models` and `efforts` are merged into the defaults, so naming one
+        # role doesn't wipe the rest.
         role_raw = llm_raw.pop("models", None) or {}
+        effort_raw = llm_raw.pop("efforts", None) or {}
         _apply(cfg.llm, llm_raw)
         cfg.llm.models = {**DEFAULT_ROLE_MODELS, **{
             str(k): str(v) for k, v in role_raw.items() if v
+        }}
+        cfg.llm.efforts = {**DEFAULT_ROLE_EFFORT, **{
+            str(k): str(v) for k, v in effort_raw.items() if v
         }}
         _apply(cfg.fetch, raw.get("fetch") or {})
 
@@ -191,10 +232,15 @@ def load_config(path: Path | None = None) -> Config:
         cfg.default_library = os.environ["LIT_LIBRARY"]
     if os.environ.get("LIT_MODEL"):
         cfg.llm.model = os.environ["LIT_MODEL"]
+    if os.environ.get("LIT_EFFORT"):
+        cfg.llm.effort = os.environ["LIT_EFFORT"]
     for role in DEFAULT_ROLE_MODELS:
         env_key = f"LIT_MODEL_{role.upper()}"
         if os.environ.get(env_key):
             cfg.llm.models[role] = os.environ[env_key]
+        effort_key = f"LIT_EFFORT_{role.upper()}"
+        if os.environ.get(effort_key):
+            cfg.llm.efforts[role] = os.environ[effort_key]
     if os.environ.get("LIT_EMAIL"):
         cfg.fetch.email = os.environ["LIT_EMAIL"]
     if os.environ.get("SEMANTIC_SCHOLAR_API_KEY"):

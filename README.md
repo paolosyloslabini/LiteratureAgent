@@ -362,6 +362,15 @@ reader = "sonnet"       # reading a full paper — the quality step
 analyst = "sonnet"      # extracting quoted evidence, tracing claims
 synthesis = "sonnet"    # writing the final cited answer
 
+[llm.efforts]           # reasoning effort, stated rather than inherited
+plan = "low"
+scout = "low"
+filter = "low"
+rank = "low"
+reader = "medium"       # reading a paper is comprehension, not reasoning
+analyst = "medium"      # quotes must be exact, so not "low"
+synthesis = "medium"
+
 [fetch]
 email = ""              # enables Unpaywall + polite-pool rate limits
 semantic_scholar_api_key = ""
@@ -371,10 +380,19 @@ long_document_pages = 50     # longer than this counts as a book, not a paper
 max_read_pages = 10          # pages sampled from such a document (0 = no limit)
 ```
 
-Override per command with `--model <alias>` and `--workers N` (`-j`), or per role
-with `LIT_MODEL_READER=opus`. `--workers` sets how many agents run at once;
-`lit find --parallel` is a different switch, deciding whether the scout agents
-run at all. Library-level settings live in `library.toml`:
+Override per command with `--model <alias>`, `--effort <level>` and `--workers N`
+(`-j`), or per role with `LIT_MODEL_READER=opus` / `LIT_EFFORT_READER=high`.
+`--workers` sets how many agents run at once; `lit find --parallel` is a
+different switch, deciding whether the scout agents run at all.
+
+`lit` states an effort on every call rather than inheriting the `effortLevel`
+from your own `settings.json` — that setting is chosen for interactive work, and
+none of these calls is a reasoning problem. On a paper read, `xhigh` spent 8,010
+output tokens where `medium` recorded the same paper just as faithfully in
+1,921: five top-level sections instead of ten sub-sections, the same headline
+finding, for 36% less. Set `effort = ""` to go back to inheriting it.
+
+Library-level settings live in `library.toml`:
 
 ```bash
 lit config set --library min_level A

@@ -12,6 +12,7 @@ from factories import make_meta
 from rich.console import Console
 
 from lit.actions.add import add_paper
+from lit.prompts import MAX_KEY_FINDINGS, MAX_SECTIONS, SECTION_WORDS_CEILING
 from lit.actions.context import Ctx, parse_target
 from lit.fetch.fulltext import FullText
 from lit.llm import LLMError
@@ -417,3 +418,122 @@ def test_metadata_venue_beats_the_text(monkeypatch, ctx):
     llm = StubLLM({**READING, "venue_from_text": "Some Workshop Nobody Heard Of"})
     wire(monkeypatch, ctx, meta=meta, fulltext=FullText("x" * 9000, "arxiv"), llm=llm)
     assert add_paper(ctx, "t").entry.venue == "NeurIPS"
+
+
+# --------------------------------------------------------------------------
+# A stored reading is a card, not a second copy of the paper
+#
+# Whatever the reader returns is capped on the way in. The bound is not just
+# about the read: a stored summary is quoted back in every later prompt that
+# ranks or searches the library, so a reading that ignores the limit goes on
+# costing tokens long after it was written.
+# --------------------------------------------------------------------------
+
+def test_a_long_reading_is_capped_on_the_way_in(monkeypatch, ctx):
+    payload = {
+        "one_liner": "Introduces the Transformer.",
+        "sections": [{"name": f"Section {i}", "summary": "Sentence. " * 200}
+                     for i in range(30)],
+        "key_findings": [f"Finding {i}" for i in range(40)],
+        "tags": ["a"],
+    }
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"),
+         llm=StubLLM(payload))
+    res = add_paper(ctx, "t")
+
+    assert len(res.entry.sections) == MAX_SECTIONS
+    assert len(res.entry.key_findings) == MAX_KEY_FINDINGS
+    for s in res.entry.sections:
+        assert len(s.summary.split()) <= SECTION_WORDS_CEILING
+
+
+def test_a_short_reading_is_left_exactly_as_written(monkeypatch, ctx):
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    res = add_paper(ctx, "t")
+    assert res.entry.sections[0].summary == "Recurrence limits parallelism."
+    assert res.entry.key_findings == ["28.4 BLEU on WMT 2014"]
+
+
+def test_the_reader_is_not_handed_the_bibliography_or_the_appendix(monkeypatch, ctx):
+    text = ("Abstract\n\n" + "Body. " * 2000
+            + "\nReferences\n\n"
+            + "\n".join(f"[{i}] A Author et al. A cited title. In Proc, 2020."
+                        for i in range(300))
+            + "\n\nAppendix A Extra Results\n\nHeld-out split scores 41.2.")
+    llm = wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"))
+    add_paper(ctx, "t")
+
+    sent = llm.seen_text[0]
+    assert "Body." in sent
+    assert "A cited title." not in sent
+    assert "41.2" not in sent
+
+
+# --------------------------------------------------------------------------
+# Reading a paper you already read, in a different library
+# --------------------------------------------------------------------------
+
+def _second_library(cfg):
+    from lit.library import Library
+    return Library.create(cfg.root_path, "otherlib", "A second shelf")
+
+
+def test_a_reading_from_another_library_is_reused(monkeypatch, ctx, cfg):
+    """The same paper on two shelves used to cost two reads."""
+    other = _second_library(cfg)
+    llm = wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+
+    first = add_paper(ctx, "t")            # read once, into `testlib`
+    assert llm.calls == 1
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    second = add_paper(moved, "t")
+
+    assert llm2.calls == 0                 # nothing was read a second time
+    assert second.ok
+    assert second.entry.status == STATUS_VERIFIED
+    assert second.entry.one_liner == first.entry.one_liner
+    assert second.entry.sections[0].name == first.entry.sections[0].name
+    assert "reused" in second.message and "testlib" in second.message
+
+
+def test_refresh_still_buys_a_fresh_reading(monkeypatch, ctx, cfg):
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(moved, "t", refresh=True)
+    assert llm2.calls == 1
+
+
+def test_an_unread_entry_elsewhere_is_not_reused(monkeypatch, ctx, cfg):
+    """Only a finished reading counts. A filed-but-unread entry has none."""
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t", read=False)        # filed from metadata, never read
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    res = add_paper(moved, "t")
+    assert llm2.calls == 1
+    assert res.entry.status == STATUS_VERIFIED
+
+
+def test_a_different_paper_elsewhere_is_not_mistaken_for_this_one(monkeypatch, ctx, cfg):
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    unrelated = make_meta(title="A Totally Different Paper", doi="10.1/xyz",
+                          arxiv_id=None)
+    llm2 = wire(monkeypatch, moved, meta=unrelated,
+                fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(moved, "other")
+    assert llm2.calls == 1

@@ -33,7 +33,7 @@ from .actions.discover import add_candidates, discover
 from .actions.inbox import process_inbox
 from .actions.refresh import refresh_entries
 from .actions.search import search as search_action
-from .config import CONFIG_PATH, Config, load_config
+from .config import CONFIG_PATH, EFFORT_LEVELS, Config, load_config
 from .library import Library, LibraryError, list_libraries, normalize_name, resolve_library
 from .models import LEVELS, STATUS_UNREAD, STATUS_VERIFIED, Entry, level_rank
 from .render import chain_tree, entries_table, entry_panel, print_answer
@@ -56,6 +56,7 @@ class State:
     verbose: bool = False
     yes: bool = False
     model: Optional[str] = None
+    effort: Optional[str] = None
     # Concurrency cap (`--workers`), not the `find --parallel` switch.
     workers: Optional[int] = None
     _cfg: Optional[Config] = None
@@ -66,6 +67,8 @@ class State:
             self._cfg = load_config()
             if self.model:
                 self._cfg.llm.override_model = self.model
+            if self.effort:
+                self._cfg.llm.override_effort = self.effort
             if self.workers:
                 self._cfg.llm.max_parallel = self.workers
         return self._cfg
@@ -127,6 +130,11 @@ def main_callback(
     model: Optional[str] = typer.Option(
         None, "--model", help="Force one model for every agent role in this command "
                               "(e.g. haiku, sonnet, opus)."),
+    effort: Optional[str] = typer.Option(
+        None, "--effort", help="Force one reasoning effort for every agent role in "
+                               "this command (low, medium, high, xhigh, max). "
+                               "Reading a paper is comprehension, not reasoning: "
+                               "raising this mostly buys longer summaries."),
     workers: Optional[int] = typer.Option(
         None, "--workers", "-j",
         help="Max concurrent agents (default: llm.max_parallel). This is how "
@@ -138,6 +146,9 @@ def main_callback(
     state.verbose = verbose
     state.yes = yes
     state.model = model
+    if effort and effort not in EFFORT_LEVELS:
+        _fail(f"unknown effort {effort!r}. Use one of: {', '.join(EFFORT_LEVELS)}")
+    state.effort = effort
     state.workers = workers
 
 
@@ -265,7 +276,8 @@ def cmd_info():
 @app.command("config")
 def cmd_config(
     action: str = typer.Argument("show", help="show | set | path"),
-    key: Optional[str] = typer.Argument(None, help="e.g. llm.models.reader, fetch.email"),
+    key: Optional[str] = typer.Argument(
+        None, help="e.g. llm.models.reader, llm.efforts.reader, fetch.email"),
     value: Optional[str] = typer.Argument(None),
     library_scope: bool = typer.Option(
         False, "--library", help="Set a library setting (scope, min_level, "
@@ -287,6 +299,7 @@ def cmd_config(
         else:
             data = {"root": cfg.root, "default_library": cfg.default_library,
                     "llm": {"model": cfg.llm.model, "models": cfg.llm.models,
+                            "effort": cfg.llm.effort, "efforts": cfg.llm.efforts,
                             "max_parallel": cfg.llm.max_parallel,
                             "timeout_s": cfg.llm.timeout_s},
                     "fetch": {"email": cfg.fetch.email,
@@ -322,6 +335,14 @@ def cmd_config(
         cfg.llm.models[role] = str(value)
         cfg.save()
         console.print(f"llm.models.{role} = {value!r}")
+        return
+    if key.startswith("llm.efforts."):
+        role = key.split(".", 2)[2]
+        if value not in EFFORT_LEVELS:
+            _fail(f"unknown effort {value!r}. Use one of: {', '.join(EFFORT_LEVELS)}")
+        cfg.llm.efforts[role] = str(value)
+        cfg.save()
+        console.print(f"llm.efforts.{role} = {value!r}")
         return
     for part in key.split(".")[:-1]:
         if not hasattr(obj, part):

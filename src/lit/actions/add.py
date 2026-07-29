@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..fetch.fulltext import fetch_fulltext, truncate_for_llm
 from ..fetch.metadata import PaperMeta, resolve_metadata, synth_bibtex
+from ..library import list_libraries
 from ..llm import LLMError
 from ..models import (
     ENTRY_TYPES,
@@ -32,7 +33,13 @@ from ..models import (
     make_key,
     normalize_code_url,
 )
-from ..prompts import READER_SYSTEM, read_paper_prompt
+from ..prompts import (
+    MAX_KEY_FINDINGS,
+    MAX_SECTIONS,
+    READER_SYSTEM,
+    SECTION_WORDS_CEILING,
+    read_paper_prompt,
+)
 from ..quality import LevelVerdict, assess, passes_quality_bar
 from ..runner import run_parallel
 from .context import DEFAULT_READ_CHARS, Ctx, Target, parse_target
@@ -175,6 +182,31 @@ def add_paper(
             entry=saved, verdict=verdict, meta=meta, warnings=warnings,
         )
 
+    # A paper you keep in two libraries was read twice, and a read is the most
+    # expensive thing here — the same PDF, the same agent, the same answer, paid
+    # for again because the entry lives in a different directory. If a sibling
+    # library under the same root has already read this one, take its reading.
+    # `--refresh` still buys a fresh one.
+    if not refresh:
+        found = _reading_elsewhere(ctx, meta)
+        if found is not None:
+            source_lib, done = found
+            entry = _base_entry(key, meta, verdict, extra_tags)
+            if existing:
+                entry.added = existing.added
+            _carry_reading(entry, done)
+            # The PDF and cached text belong to the other library's directory,
+            # so this entry claims neither; `lit read --refresh` fetches its own.
+            entry.pdf_path = None
+            entry.tags = _norm_tags(list(done.tags) + list(extra_tags or []))
+            saved = lib.save_entry(entry)
+            return AddResult(
+                "updated" if existing else "added",
+                f"[{key}] {entry.title} (reading reused from library "
+                f"'{source_lib}' — --refresh to re-read)",
+                entry=saved, verdict=verdict, meta=meta, warnings=warnings,
+            )
+
     ctx.vlog(f"[{key}] fetching full text")
     ft = fetch_fulltext(
         ctx.http, meta,
@@ -206,7 +238,11 @@ def add_paper(
 
     # ---- 5. read it ------------------------------------------------------
     budget = max_chars or ctx.read_budget
-    text, truncated = truncate_for_llm(ft.text, budget, drop_references=True)
+    # Bibliography and back matter both go: this call writes the library card,
+    # and neither belongs on one. `ask` and `claim` keep the appendix, because
+    # the evidence for a question may well be in a table there.
+    text, truncated = truncate_for_llm(ft.text, budget, drop_references=True,
+                                       drop_appendix=True)
     if truncated:
         warnings.append(
             f"document is {ft.chars:,} chars; the middle was omitted to fit context"
@@ -308,6 +344,32 @@ def _base_entry(key: str, meta: PaperMeta, verdict: LevelVerdict,
     )
 
 
+def _reading_elsewhere(ctx: Ctx, meta: PaperMeta) -> tuple[str, Entry] | None:
+    """A finished reading of this paper in another library under the same root.
+
+    Identity is the same test `find_duplicate` uses within a library — DOI,
+    arXiv id, then normalized title — so a paper is only recognised when an
+    identifier or the title agrees, never on a loose match.
+    """
+    try:
+        siblings = list_libraries(ctx.cfg)
+    except Exception:
+        return None
+    here = ctx.library.path.resolve()
+    for other in siblings:
+        if other.path.resolve() == here:
+            continue
+        try:
+            match = other.find_duplicate(
+                doi=meta.doi, arxiv_id=meta.arxiv_id, title=meta.title
+            )
+        except Exception:
+            continue
+        if match is not None and match.is_verified and match.one_liner:
+            return other.name, match
+    return None
+
+
 def _carry_reading(entry: Entry, existing: Entry) -> None:
     """Move an earlier read's output onto a freshly built entry.
 
@@ -338,12 +400,18 @@ def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
     one = str(data.get("one_liner") or "").strip()
     entry.one_liner = one or None
 
+    # Capped rather than trusted. The prompt asks for a bounded record, but the
+    # bound is what keeps a stored summary small, and a stored summary is quoted
+    # back in every later prompt that ranks or searches the library — so a
+    # reader that ignores the limit would go on costing tokens after the read.
     entry.sections = [
         s for s in (Section.coerce(x) for x in (data.get("sections") or [])) if s
-    ]
+    ][:MAX_SECTIONS]
+    for s in entry.sections:
+        s.summary = _clip_words(s.summary, SECTION_WORDS_CEILING)
     entry.key_findings = [
         str(f).strip() for f in (data.get("key_findings") or []) if str(f).strip()
-    ]
+    ][:MAX_KEY_FINDINGS]
 
     tags = _norm_tags(list(data.get("tags") or []) + list(extra_tags or []))
     entry.tags = tags
@@ -405,6 +473,18 @@ def _code_url_from_reading(raw: object, text: str) -> str | None:
 
 def _fold(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _clip_words(text: str, limit: int) -> str:
+    """Cut a summary to `limit` words, on a sentence boundary where there is one."""
+    words = (text or "").split()
+    if len(words) <= limit:
+        return text
+    clipped = " ".join(words[:limit])
+    stop = max(clipped.rfind(". "), clipped.rfind("! "), clipped.rfind("? "))
+    if stop > len(clipped) * 0.5:
+        return clipped[:stop + 1]
+    return clipped.rstrip(",;:") + "…"
 
 
 def _norm_tags(tags: list[str]) -> list[str]:
