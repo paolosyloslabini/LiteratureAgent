@@ -25,7 +25,7 @@ from ..llm import LLMError
 from ..models import Entry, Reference, slugify
 from ..prompts import ANALYST_SYSTEM, SCOUT_SYSTEM, claim_origin_prompt, find_claim_source_prompt
 from ..runner import run_parallel
-from .add import MAX_PROMPT_CHARS, add_paper
+from .add import add_paper
 from .context import Ctx, Target, parse_target
 
 MAX_CANDIDATES_PER_HOP = 3
@@ -275,7 +275,9 @@ def _load_node(ctx: Ctx, target: Target, entry: Entry | None = None) -> Node | N
     )
     node = Node(meta=meta, entry=entry)
     if ft is not None:
-        node.text, node.truncated = truncate_for_llm(ft.text, MAX_PROMPT_CHARS)
+        # References are deliberately left in: tracing a claim means reading the
+        # citation context around it, so the bibliography is the evidence here.
+        node.text, node.truncated = truncate_for_llm(ft.text, ctx.read_budget)
     return node
 
 

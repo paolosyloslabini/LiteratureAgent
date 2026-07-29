@@ -195,16 +195,25 @@ class ClaudeCLI:
         paper is minutes of work and a whole PDF fetch; a transient hiccup —
         an API blip, a session that ends on a stray tool_use — must not throw
         that away when a second attempt would succeed.
+
+        A reply that arrived but would not parse gets a *repair* pass rather
+        than a full retry: the model already read the paper and only formatted
+        its answer wrong, so the next call carries the unusable reply instead of
+        the document. Re-sending the paper would cost as much as the original
+        read to be told the same thing in valid JSON. If the repair also fails,
+        the attempt after it redoes the work in full.
         """
-        attempt_prompt = prompt
+        attempt_prompt, attempt_stdin = prompt, stdin_text
+        attempt_tools, repairing = tools, False
         last_err = ""
+
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 res = self.run(
                     attempt_prompt,
-                    stdin_text=stdin_text,
+                    stdin_text=attempt_stdin,
                     system=system,
-                    tools=tools,
+                    tools=attempt_tools,
                     max_turns=max_turns,
                     model=model,
                     role=role,
@@ -214,6 +223,9 @@ class ClaudeCLI:
                 last_err = str(exc)
                 if attempt == self.cfg.max_retries:
                     raise
+                # Nothing came back to repair, so redo the whole call.
+                attempt_prompt, attempt_stdin = prompt, stdin_text
+                attempt_tools, repairing = tools, False
                 continue
 
             try:
@@ -226,12 +238,22 @@ class ClaudeCLI:
                     return data
                 last_err = f"missing required key(s): {', '.join(missing)}"
 
-            attempt_prompt = (
-                f"{prompt}\n\n"
-                f"IMPORTANT: your previous reply could not be used ({last_err}). "
-                "Reply with the raw JSON object only — no prose, no markdown "
-                "fences, no explanation before or after."
-            )
+            if not repairing and res.text.strip():
+                # Repair the reply we have. Sealed, because reformatting text
+                # the model already wrote needs no tools even when the original
+                # call was an agentic one.
+                attempt_prompt = _repair_prompt(last_err, required)
+                attempt_stdin = "=== REPLY TO REPAIR ===\n" + res.text
+                attempt_tools, repairing = None, True
+            else:
+                attempt_prompt = (
+                    f"{prompt}\n\n"
+                    f"IMPORTANT: your previous reply could not be used ({last_err}). "
+                    "Reply with the raw JSON object only — no prose, no markdown "
+                    "fences, no explanation before or after."
+                )
+                attempt_stdin, attempt_tools, repairing = stdin_text, tools, False
+
         raise LLMError(f"claude did not return usable JSON after "
                        f"{self.cfg.max_retries + 1} attempts: {last_err}")
 
@@ -239,6 +261,29 @@ class ClaudeCLI:
 # --------------------------------------------------------------------------
 # JSON salvage
 # --------------------------------------------------------------------------
+
+def _repair_prompt(err: str, required: tuple[str, ...]) -> str:
+    """Ask for the same answer back as valid JSON, without resending the source.
+
+    The reply being repaired arrives over stdin, so this stays small enough for
+    argv however long that reply is.
+    """
+    keys = (f" It must contain the key(s): {', '.join(required)}."
+            if required else "")
+    return "\n".join([
+        "The text after the marker below is a reply that was supposed to be a "
+        f"single JSON object, but it could not be used ({err}).",
+        "",
+        "Convert it into that JSON object.",
+        "",
+        "- Keep the content exactly as written. Do not re-do the work, do not "
+        "add findings, and do not drop any.",
+        "- Reply with the raw JSON object only — no prose, no markdown fences, "
+        f"no explanation before or after.{keys}",
+        "- If the reply is cut off mid-way, emit a valid object holding "
+        "whatever it does contain rather than inventing an ending.",
+    ])
+
 
 def extract_json(text: str) -> dict:
     """Pull a JSON object out of a model reply that may be wrapped in prose."""

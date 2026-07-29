@@ -26,7 +26,7 @@ from ..prompts import (
     synthesize_answer_prompt,
 )
 from ..runner import run_parallel
-from .add import MAX_PROMPT_CHARS, add_paper
+from .add import add_paper
 from .context import Ctx, Target
 from .search import search
 
@@ -126,7 +126,12 @@ def ask(
 
     # ---- 1. pick what to read -------------------------------------------
     ctx.log("[bold]Selecting[/bold] sources from the library…")
-    sel = search(ctx, question, limit=read, pool=pool, level=level, tag=tag)
+    # `brief` because this call only decides which papers to open. The prose
+    # answer `search` normally writes is drawn from summaries and would be
+    # thrown away here — the answer this command returns is synthesized in
+    # step 4 from the full texts.
+    sel = search(ctx, question, limit=read, pool=pool, level=level, tag=tag,
+                 brief=True)
     # An entry that was filed but never read is a perfectly good source here:
     # `ask` fetches the full text itself. Only UNVERIFIED entries are skipped,
     # because for those the full text was already looked for and not found.
@@ -167,7 +172,7 @@ def ask(
         if ft is None:
             return Evidence(entry=entry, relevant=False,
                             error="full text no longer retrievable")
-        text, truncated = truncate_for_llm(ft.text, MAX_PROMPT_CHARS,
+        text, truncated = truncate_for_llm(ft.text, ctx.read_budget,
                                            drop_references=True)
         data = ctx.llm.json(
             extract_evidence_prompt(
@@ -260,6 +265,12 @@ def _expand_from_references(ctx: Ctx, entries: list[Entry], question: str,
 
     Ranked by how many of the chosen papers cite them: a work that several of
     your best sources all point at is worth reading.
+
+    They are filed from their metadata, not read. `extract` is about to fetch
+    each one's full text and put it in front of an agent anyway; reading them
+    here as well would put the same document through two full-text calls in a
+    single command. The entry is left `unread`, and `lit read <key>` buys the
+    stored summary later if it turns out to be worth one.
     """
     lib = ctx.library
     counts: dict[str, int] = {}
@@ -286,8 +297,12 @@ def _expand_from_references(ctx: Ctx, entries: list[Entry], question: str,
         res = add_paper(
             ctx, ref.title,
             target=Target(doi=ref.doi, arxiv_id=ref.arxiv_id, title=ref.title),
+            read=False,
         )
-        if res.ok and res.entry and res.entry.is_verified:
+        # Unread is the expected state here; a paper whose full text cannot be
+        # reached is reported by `extract` as unreadable rather than dropped
+        # silently at this point.
+        if res.ok and res.entry and (res.entry.is_verified or res.entry.is_unread):
             picked.append(res.entry)
     return picked
 

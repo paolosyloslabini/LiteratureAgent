@@ -35,11 +35,11 @@ from ..models import (
 from ..prompts import READER_SYSTEM, read_paper_prompt
 from ..quality import LevelVerdict, assess, passes_quality_bar
 from ..runner import run_parallel
-from .context import Ctx, Target, parse_target
+from .context import DEFAULT_READ_CHARS, Ctx, Target, parse_target
 
-# Default ceiling on how much paper text we hand the model in one call. The
-# live value comes from `llm.read_chars`; this is the fallback.
-MAX_PROMPT_CHARS = 400_000
+# Kept as a name for callers that imported it. The live budget is
+# `Ctx.read_budget`, which reads `llm.read_chars`.
+MAX_PROMPT_CHARS = DEFAULT_READ_CHARS
 
 
 @dataclass
@@ -205,7 +205,7 @@ def add_paper(
         )
 
     # ---- 5. read it ------------------------------------------------------
-    budget = max_chars or getattr(ctx.cfg.llm, "read_chars", MAX_PROMPT_CHARS)
+    budget = max_chars or ctx.read_budget
     text, truncated = truncate_for_llm(ft.text, budget, drop_references=True)
     if truncated:
         warnings.append(

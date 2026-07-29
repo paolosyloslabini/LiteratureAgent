@@ -62,8 +62,14 @@ def search(
     year_from: int | None = None,
     year_to: int | None = None,
     rank: bool = True,
+    brief: bool = False,
 ) -> SearchResult:
-    """Retrieve with FTS, then optionally re-rank and answer with the LLM."""
+    """Retrieve with FTS, then optionally re-rank and answer with the LLM.
+
+    `brief` ranks without writing the prose answer, on short entry cards. It is
+    for callers that want the ordering and nothing else — `lit ask` choosing
+    which papers to open — and leaves `answer` and `gaps` empty.
+    """
     result = SearchResult(query=query)
 
     with Store(ctx.library) as store:
@@ -87,7 +93,8 @@ def search(
     try:
         data = ctx.llm.json(
             library_search_prompt(
-                query=query, scope=ctx.library.settings.scope, entries=entries
+                query=query, scope=ctx.library.settings.scope, entries=entries,
+                brief=brief,
             ),
             system=ANALYST_SYSTEM,
             role="filter",

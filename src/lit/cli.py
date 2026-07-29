@@ -994,7 +994,8 @@ def cmd_ask(
     expand: int = typer.Option(
         0, "-e", "--expand",
         help="Also pull in up to N works cited by those papers but not yet in "
-             "the library, and read them too."),
+             "the library. They are quoted from like any other source, and "
+             "filed unread — `lit read <key>` summarizes one later."),
     level: Optional[str] = typer.Option(None, "--level"),
     tag: Optional[str] = typer.Option(None, "--tag", "-t"),
     save: Optional[Path] = typer.Option(None, "--save",
