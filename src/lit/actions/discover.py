@@ -21,11 +21,18 @@ fed from two sources that cost API calls rather than tokens:
    the library carries a structured reference list pulled from the metadata
    APIs. Works cited by several of your papers but not yet in the library are
    exactly the gaps worth filling.
-2. **Indexed search** across Crossref, OpenAlex and arXiv. The same query is
-   asked several ways — best keyword match, most-cited, published recently,
-   reviews only, arXiv preprints — because one query asked one way returns a
-   monoculture. Each facet is a plain HTTP request that returns real works with
-   real identifiers, citation counts and abstracts.
+2. **Indexed search** across Crossref, Semantic Scholar and arXiv. The same
+   query is asked several ways — best keyword match, most-cited, published
+   recently, reviews only, arXiv preprints — because one query asked one way
+   returns a monoculture. Each facet is a plain HTTP request that returns real
+   works with real identifiers, citation counts and abstracts.
+
+   When an index does not answer, that is *reported*, not absorbed. A search
+   source that fails returns an empty list, which is indistinguishable from a
+   source that had nothing to say — so a dead index used to cost a run its
+   most-cited facet and its citation figures without a word to the user, who
+   then saw a confident table of whatever the surviving sources returned. Every
+   phase below counts what failed to reach an index and says so.
 
 `--parallel` adds a third source on top: **scout agents** searching the web,
 one per angle. They cost real tokens, so they are opt-in, and their angles are
@@ -44,8 +51,8 @@ The pool is then ranked on two things, in this order of weight:
 2. **Importance** — how much the work matters, computed in code from citation
    velocity and venue rank (the same metrics `quality.assess` uses), plus what
    this library's own papers cite. Search hits arrive carrying these figures;
-   anything else gets one free OpenAlex lookup, made *before* ranking rather
-   than during the read, so the cut is informed by them.
+   anything else is filled in by a single batched Semantic Scholar lookup, made
+   *before* ranking rather than during the read, so the cut is informed by them.
 
 Papers are then filed from their metadata. Reading them in full is a separate,
 opt-in step (`--read` here, or `lit read` later), because a section-by-section
@@ -58,8 +65,19 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date
+from itertools import zip_longest
 
-from ..fetch.metadata import PaperMeta, from_openalex, search_arxiv, search_openalex, search_works
+from ..fetch.metadata import (
+    S2_REVIEW_TYPE,
+    S2_SORT_CITED,
+    CROSSREF_SORT_CITED,
+    PaperMeta,
+    batch_s2,
+    s2_by_title,
+    search_arxiv,
+    search_crossref,
+    search_semantic_scholar,
+)
 from ..llm import LLMError
 from ..models import normalize_arxiv, normalize_doi, slugify
 from ..prompts import (
@@ -130,13 +148,23 @@ RECENT_YEARS = 2
 
 # The free facets. Each is one HTTP request; together they are the cheap
 # equivalent of pointing several scouts at different angles.
+#
+# `foundational` is the one that answers "what are the landmark papers here",
+# and it is asked of both citation-aware indexes rather than one. Crossref
+# counts only citations from DOI-registered work, which in CS undercounts a
+# preprint badly; Semantic Scholar counts arXiv properly but shares an
+# unauthenticated rate-limit pool with the world. Either can come back empty, so
+# neither is trusted to carry the facet alone.
 SEARCH_FACETS: list[tuple[str, str]] = [
-    ("relevance", "best keyword match (Crossref + OpenAlex)"),
+    ("relevance", "best keyword match (Crossref + Semantic Scholar)"),
     ("foundational", "most-cited work on the topic"),
     ("recent", f"published in the last {RECENT_YEARS} years"),
     ("surveys", "reviews and survey articles"),
     ("preprints", "arXiv preprints, including work too new to be indexed"),
 ]
+
+# The indexes a run talks to, for reporting which of them went quiet.
+INDEX_NAMES = "Crossref, Semantic Scholar, arXiv"
 
 
 # ---- query planning -------------------------------------------------------
@@ -145,7 +173,10 @@ SEARCH_FACETS: list[tuple[str, str]] = [
 MAX_PLAN_QUERIES = 3
 # Tags the plan may hang on what it finds.
 MAX_PLAN_TAGS = 6
-# Document types a request may ask for, spelled as OpenAlex spells them.
+# Document types a request may ask for. Each index has its own vocabulary and
+# its own gaps — Crossref can filter all but `review`, Semantic Scholar only
+# `review` — so this is the neutral spelling the plan uses and each search
+# function translates what it can (see `_CROSSREF_KINDS`).
 PLAN_KINDS = ["review", "article", "preprint", "book", "book-chapter",
               "dataset", "dissertation", "report"]
 # Words people use for those types, mapped onto them.
@@ -163,7 +194,7 @@ class SearchPlan:
     """What a plain-language request turns out to be asking the indexes for.
 
     A query typed at a person — "recent surveys on RAG, nothing before 2022" —
-    is not a query an index can answer. Crossref and OpenAlex have fields for
+    is not a query an index can answer. Crossref and Semantic Scholar have fields for
     two thirds of that sentence, but handed it whole they match `recent` and
     `nothing` as keywords. This is that sentence taken apart: the topic in the
     field's own vocabulary, a date window, a document type.
@@ -272,7 +303,7 @@ class Candidate:
     # How many library papers cite this (co-citation signal).
     cocitations: int = 0
     source: str = "scout"  # search | scout | references | both
-    # Filled by `_enrich` from OpenAlex, before ranking.
+    # Filled by `_enrich` from Semantic Scholar, before ranking.
     citation_count: int | None = None
     # Filled by `_score_relevance`. None means the pass did not run.
     relevance: float | None = None
@@ -389,6 +420,20 @@ class FindResult:
     dropped_out_of_window: int = 0
     # True when the candidates were filed without being read.
     unread: bool = False
+    # Requests that never reached an index — a timeout, a refused connection, or
+    # a rate limit that outlasted the retries. Distinct from a search that ran
+    # and found nothing, and the difference matters: the first means the pool is
+    # missing work that exists, the second means there is none.
+    search_failures: int = 0
+    weigh_failures: int = 0
+    # Candidates that reached the ranking with no citation count at all, so
+    # their importance was assumed rather than measured.
+    unweighed: int = 0
+
+    @property
+    def degraded(self) -> bool:
+        """Did some part of the search fail to reach the index it needed?"""
+        return bool(self.search_failures or self.weigh_failures)
 
     def to_dict(self) -> dict:
         return {
@@ -397,6 +442,12 @@ class FindResult:
             "scout_errors": self.scout_errors,
             "plan": self.plan.to_dict() if self.plan else None,
             "unread": self.unread,
+            "degraded": self.degraded,
+            "index_failures": {
+                "search": self.search_failures,
+                "weigh": self.weigh_failures,
+                "ranked_without_citations": self.unweighed,
+            },
             "pool": {
                 "total": self.pool_size,
                 "from_references": self.from_references,
@@ -593,14 +644,22 @@ def discover(
         extra = (f" × {len(plan.queries)} phrasings" if len(plan.queries) > 1
                  else "")
         ctx.log(
-            f"[bold]Searching[/bold] {len(SEARCH_FACETS)} indexes{extra} "
-            f"(Crossref, OpenAlex, arXiv) — no tokens spent…"
+            f"[bold]Searching[/bold] {len(SEARCH_FACETS)} facets{extra} "
+            f"({INDEX_NAMES}) — no tokens spent…"
         )
+        before = ctx.http.unavailable_count
         hits = _search_candidates(ctx, plan, per_facet=per_facet)
+        result.search_failures = ctx.http.unavailable_count - before
         result.from_search = len(hits)
         for c in hits:
             absorb(c)
         ctx.vlog(f"  {len(hits)} candidates from indexed search")
+        if result.search_failures:
+            ctx.log(
+                f"  [yellow]{result.search_failures} index request(s) never got "
+                f"an answer[/yellow] — some facets searched nothing, so work "
+                f"that exists may be missing from this pool"
+            )
 
     # ---- source 3: web scouts, in parallel (opt-in, costs tokens) --------
     if use_scouts:
@@ -662,9 +721,26 @@ def discover(
                 f"before scoring ({solo} held for uncorroborated work)")
 
     if considered:
-        _enrich(ctx, considered)
+        before = ctx.http.unavailable_count
+        result.unweighed = _enrich(ctx, considered)
+        result.weigh_failures = ctx.http.unavailable_count - before
         considered, late = _apply_window(plan, considered)
         out_of_window += late
+        if result.weigh_failures:
+            ctx.log(
+                f"  [yellow]{result.weigh_failures} metadata request(s) never got "
+                f"an answer[/yellow]"
+            )
+        if result.unweighed:
+            # Importance is 65% relevance / 35% measured stature. With no
+            # citation count the stature half falls back to an assumed middling
+            # value, identical for every such paper — so the ranking below is
+            # doing much less work than the numbers in the table suggest.
+            ctx.log(
+                f"  [yellow]{result.unweighed} of {len(considered)} ranked with "
+                f"no citation count[/yellow] — their importance is assumed, not "
+                f"measured"
+            )
 
     result.dropped_out_of_window = out_of_window
     if out_of_window:
@@ -681,6 +757,18 @@ def discover(
 
     kept.sort(key=lambda c: (-c.rank_score, -(c.year or 0)))
     result.candidates = kept[:limit]
+
+    # Said once, at the end, where the failures above have already been counted.
+    # Semantic Scholar supplies the citation counts this ranking rests on, and
+    # unauthenticated callers share one throttled pool with everyone else — so
+    # the commonest cause of a thin, uninformed pool has a free fix, and the
+    # moment it bites is the moment worth mentioning it.
+    if result.degraded and not ctx.cfg.fetch.semantic_scholar_api_key:
+        ctx.log(
+            "  [dim]Semantic Scholar throttles callers without an API key; a "
+            "free one removes most of these failures. Set "
+            "fetch.semantic_scholar_api_key or $SEMANTIC_SCHOLAR_API_KEY.[/dim]"
+        )
     return result
 
 
@@ -762,33 +850,80 @@ def _search_candidates(ctx: Ctx, plan: SearchPlan, *,
 
 def _search_facet(ctx: Ctx, query: str, facet: str, limit: int,
                   plan: SearchPlan) -> list[PaperMeta]:
-    """One facet of the free search. Split out so tests can stub the network."""
+    """One facet of the free search. Split out so tests can stub the network.
+
+    Facets that ask about standing rather than wording — `foundational` above
+    all — go to both citation-aware indexes and pool the answers, because each
+    is blind where the other sees. Crossref cannot see a preprint at all;
+    Semantic Scholar can be rate-limited into silence. Asking only one means a
+    facet that quietly returns nothing on the day that index is unhappy.
+    """
     http = ctx.http
+    key = ctx.cfg.fetch.semantic_scholar_api_key
     lo, hi, kind = plan.year_from, plan.year_to, plan.kind
+
     if facet == "foundational":
-        return search_openalex(http, query, limit=limit, sort="cited_by_count:desc",
-                               from_year=lo, to_year=hi, kind=kind)
+        # The one facet whose entire job is surfacing landmark work. Both
+        # orderings are undercounts of the same thing, so take both.
+        return _merge_metas(
+            search_semantic_scholar(http, query, limit=limit, sort=S2_SORT_CITED,
+                                    from_year=lo, to_year=hi, kind=_s2_kind(kind),
+                                    api_key=key),
+            search_crossref(http, query, limit, sort=CROSSREF_SORT_CITED,
+                            from_year=lo, to_year=hi, kind=kind),
+        )
     if facet == "recent":
         floor = date.today().year - RECENT_YEARS
         # "Recent" and a window that closes before it are contradictory; the
         # window is what the person actually asked for, so the facet stands down.
         if hi and hi < floor:
             return []
-        return search_openalex(http, query, limit=limit, kind=kind,
-                               from_year=max(floor, lo or floor), to_year=hi)
+        since = max(floor, lo or floor)
+        return _merge_metas(
+            search_semantic_scholar(http, query, limit=limit, from_year=since,
+                                    to_year=hi, kind=_s2_kind(kind), api_key=key),
+            search_crossref(http, query, limit, from_year=since, to_year=hi,
+                            kind=kind),
+        )
     if facet == "surveys":
-        return search_openalex(http, query, limit=limit, kind="review",
-                               from_year=lo, to_year=hi)
+        # Crossref has no "review" document type — a survey is registered as an
+        # ordinary journal article — so this facet rests on S2's own label.
+        return search_semantic_scholar(http, query, limit=limit,
+                                       kind=S2_REVIEW_TYPE, from_year=lo,
+                                       to_year=hi, api_key=key)
     if facet == "preprints":
         return search_arxiv(http, query, limit=limit, from_year=lo, to_year=hi)
-    if kind:
-        # Crossref has no filter for "reviews only", OpenAlex does. A document
-        # type the request actually asked for is worth giving up Crossref's
-        # index for on this one facet.
-        return search_openalex(http, query, limit=limit, kind=kind,
-                               from_year=lo, to_year=hi)
-    return search_works(http, query, limit, ctx.cfg.fetch,
-                        from_year=lo, to_year=hi)
+    return _merge_metas(
+        search_crossref(http, query, limit, from_year=lo, to_year=hi, kind=kind),
+        search_semantic_scholar(http, query, limit=limit, from_year=lo,
+                                to_year=hi, kind=_s2_kind(kind), api_key=key),
+    )
+
+
+def _s2_kind(kind: str | None) -> str | None:
+    """The plan's document type in Semantic Scholar's vocabulary, if it has one."""
+    return S2_REVIEW_TYPE if kind == "review" else None
+
+
+def _merge_metas(*groups: list[PaperMeta]) -> list[PaperMeta]:
+    """Interleave results from several indexes, dropping repeats.
+
+    Interleaved rather than concatenated so that a `per_facet` slice downstream
+    takes the best of each index instead of all of whichever answered first.
+    """
+    out: list[PaperMeta] = []
+    seen: set[str] = set()
+    for row in zip_longest(*groups):
+        for meta in row:
+            if meta is None or not meta.title:
+                continue
+            key = (meta.doi or (f"arxiv:{meta.arxiv_id}" if meta.arxiv_id
+                                else slugify(meta.title, 120)))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(meta)
+    return out
 
 
 def _meta_to_candidate(meta: PaperMeta, facet: str) -> Candidate | None:
@@ -808,61 +943,90 @@ def _meta_to_candidate(meta: PaperMeta, facet: str) -> Candidate | None:
     )
 
 
-def _enrich(ctx: Ctx, candidates: list[Candidate]) -> None:
-    """Fill in citation count and venue from OpenAlex — one lookup each, no LLM.
+def _enrich(ctx: Ctx, candidates: list[Candidate]) -> int:
+    """Fill in citation count and venue from Semantic Scholar, no LLM.
 
     This is what lets importance be measured rather than guessed. It runs
     before the cut, unlike the metadata resolution during a read, because a
     citation count discovered after a paper has been dropped is no use.
 
-    Candidates that came from indexed search already carry their citation count
-    and venue, so they are skipped — there is nothing left to look up.
+    Candidates carrying an identifier go in one batch request — S2 answers for
+    up to 500 papers at a time, so weighing a pool of forty costs a single call
+    against an index that throttles at roughly one request a second. Only the
+    candidates with no identifier at all need a title search of their own, and
+    those are usually a handful mined from reference lists.
+
+    Returns the number still lacking a citation count afterwards, so the caller
+    can say plainly when the pool was ranked without the numbers.
     """
     pending = [c for c in candidates if c.citation_count is None or not c.venue]
     if not pending:
         ctx.vlog(f"  all {len(candidates)} candidates already carry their metrics")
-        return
-    ctx.log(f"[bold]Weighing[/bold] {len(pending)} candidates "
-            f"(citations, venue)…")
+        return 0
+    ctx.log(f"[bold]Weighing[/bold] {len(pending)} candidates (citations, venue)…")
 
-    def look_up(c: Candidate):
-        return _lookup_meta(ctx, c)
+    by_ident: dict[str, Candidate] = {}
+    untitled: list[Candidate] = []
+    for c in pending:
+        ident = (f"DOI:{c.doi}" if c.doi
+                 else f"arXiv:{c.arxiv_id}" if c.arxiv_id else None)
+        if ident:
+            by_ident.setdefault(ident, c)
+        else:
+            untitled.append(c)
 
-    runs = run_parallel(pending, look_up, workers=ctx.workers)
     found = 0
-    for r in runs:
-        c: Candidate = r.item  # type: ignore[assignment]
-        if not r.ok:
-            ctx.vlog(f"  lookup failed for {c.title[:60]}: {r.error}")
-            continue
-        meta = r.value
-        if meta is None:
-            continue
-        found += 1
-        if meta.citation_count is not None:
-            c.citation_count = meta.citation_count
-        c.venue = c.venue or meta.venue
-        c.year = c.year or meta.year
-        # A record found by title may be a mirror or re-registration of the
-        # work rather than the work itself (see `PaperMeta.supplementary`).
-        # Its citations and venue still describe the right paper and are only
-        # used for scoring, but its identifiers would be handed to the reader
-        # as a Target — so those are taken only from an identifier lookup.
-        if not meta.title_matched:
-            c.doi = c.doi or meta.doi
-            c.arxiv_id = c.arxiv_id or meta.arxiv_id
-        c.abstract = c.abstract or meta.abstract
+    if by_ident:
+        metas = _batch_lookup(ctx, list(by_ident))
+        for ident, meta in metas.items():
+            if (c := by_ident.get(ident)) is not None:
+                _absorb_meta(c, meta)
+                found += 1
+
+    if untitled:
+        runs = run_parallel(untitled, lambda c: _lookup_meta(ctx, c),
+                            workers=ctx.workers)
+        for r in runs:
+            c: Candidate = r.item  # type: ignore[assignment]
+            if not r.ok:
+                ctx.vlog(f"  lookup failed for {c.title[:60]}: {r.error}")
+                continue
+            if r.value is not None:
+                _absorb_meta(c, r.value)
+                found += 1
+
     ctx.vlog(f"  metadata found for {found}/{len(pending)}")
+    return sum(1 for c in candidates if c.citation_count is None)
+
+
+def _absorb_meta(c: Candidate, meta: PaperMeta) -> None:
+    """Copy what a metadata lookup found onto a candidate."""
+    if meta.citation_count is not None:
+        c.citation_count = meta.citation_count
+    c.venue = c.venue or meta.venue
+    c.year = c.year or meta.year
+    # A record found by title may be a mirror or re-registration of the work
+    # rather than the work itself (see `PaperMeta.supplementary`). Its citations
+    # and venue still describe the right paper and are only used for scoring,
+    # but its identifiers would be handed to the reader as a Target — so those
+    # are taken only from an identifier lookup.
+    if not meta.title_matched:
+        c.doi = c.doi or meta.doi
+        c.arxiv_id = c.arxiv_id or meta.arxiv_id
+    c.abstract = c.abstract or meta.abstract
+
+
+def _batch_lookup(ctx: Ctx, idents: list[str]) -> dict[str, PaperMeta]:
+    """One batched S2 request for many papers. Split out so tests can stub it."""
+    return batch_s2(ctx.http, idents, ctx.cfg.fetch.semantic_scholar_api_key,
+                    with_references=False)
 
 
 def _lookup_meta(ctx: Ctx, c: Candidate):
-    """One OpenAlex hit for a candidate. Split out so tests can stub it."""
-    return from_openalex(
-        ctx.http,
-        doi=c.doi,
-        title=None if c.doi else c.title,
-        with_references=False,
-    )
+    """One title lookup for a candidate with no identifier. Stubbed in tests."""
+    return s2_by_title(ctx.http, c.title,
+                       ctx.cfg.fetch.semantic_scholar_api_key,
+                       with_references=False)
 
 
 def _score_relevance(ctx: Ctx, plan: SearchPlan,
@@ -918,7 +1082,7 @@ def mine_references(entries, known_slugs: set[str],
                     known_ids: set[str]) -> list[Candidate]:
     """Harvest works cited by library entries but not yet in the library.
 
-    Reference lists come from Crossref/OpenAlex/S2, not from a model, so these
+    Reference lists come from Crossref and Semantic Scholar, not from a model, so these
     candidates are real works with real identifiers.
     """
     counts: dict[str, int] = {}

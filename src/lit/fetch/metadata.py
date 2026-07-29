@@ -1,19 +1,31 @@
-"""Bibliographic metadata lookup across Crossref, arXiv, OpenAlex and S2.
+"""Bibliographic metadata lookup across Crossref, arXiv and Semantic Scholar.
 
 Design notes:
-* OpenAlex is the primary source for reference lists: it is free, has no hard
-  rate limit for polite users, and exposes `referenced_works`.
-* Semantic Scholar is richer for reference titles, and is the only source that
-  counts citations to arXiv-only work properly. It rate-limits aggressively
-  without an API key, so it is asked for one record per paper, no more.
+* Semantic Scholar is the primary source for citation counts and reference
+  lists. It is the only free index that counts citations to arXiv-only work
+  properly, and it answers for up to 500 papers in a single batch request.
+  Its unauthenticated pool is shared and bursts earn a 429, so every call goes
+  through the host throttle in `http.py` and bulk work uses `batch_s2`.
+* Crossref is authoritative for the published version, gives ready BibTeX, and
+  has no practical rate limit for polite callers — which makes it the source
+  that is always reachable when the others are not.
 * No index is authoritative for citation counts; they are combined by taking
   the largest, which `merge` explains.
-* Crossref is authoritative for the published version and gives ready BibTeX.
 * A published version always wins over a preprint, per the spec.
+
+OpenAlex used to sit between these two and is deliberately gone. It moved to a
+metered credit model: once the small daily allowance is spent every request
+comes back 429 "Insufficient budget" until midnight UTC. Because a dead index
+returns an empty list rather than an error, that failure was invisible — a
+`find` would quietly lose its most-cited facet, its reviews facet and every
+citation lookup, then rank whatever Crossref and arXiv happened to return. A
+source that can silently stop answering for the rest of the day is worse than
+no source at all.
 """
 
 from __future__ import annotations
 
+import html
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -25,8 +37,15 @@ from .http import HttpClient
 
 CROSSREF_API = "https://api.crossref.org/works"
 ARXIV_API = "https://export.arxiv.org/api/query"
-OPENALEX_API = "https://api.openalex.org/works"
 S2_API = "https://api.semanticscholar.org/graph/v1/paper"
+# Relevance search tops out at 100 per page; the bulk endpoint is the only one
+# that can sort, which is what makes a "most-cited work on this topic" facet
+# possible at all.
+S2_SEARCH_API = f"{S2_API}/search"
+S2_BULK_API = f"{S2_API}/search/bulk"
+S2_BATCH_API = f"{S2_API}/batch"
+# The batch endpoint accepts 500 ids per request.
+S2_BATCH_MAX = 500
 
 _ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 
@@ -197,117 +216,35 @@ def _arxiv_entry(entry, *, fallback_id: str = "") -> PaperMeta | None:
     return meta
 
 
-def from_openalex(http: HttpClient, *, doi: str | None = None,
-                  openalex_id: str | None = None, title: str | None = None,
-                  with_references: bool = True) -> PaperMeta | None:
-    title_matched = False
-    if doi:
-        url = f"{OPENALEX_API}/doi:{doi}"
-        data = http.get_json(url)
-    elif openalex_id:
-        data = http.get_json(f"{OPENALEX_API}/{openalex_id.rsplit('/', 1)[-1]}")
-    elif title:
-        # OpenAlex holds several records for the same work (a preprint copy, a
-        # proceedings copy, near-title-matches on other papers). Pull a handful
-        # and pick the best title match, breaking ties toward the most-cited —
-        # that is the canonical record for the work.
-        res = http.get_json(
-            OPENALEX_API,
-            params={"filter": f"title.search:{title}", "per-page": 8,
-                    "select": "id,title,display_name,publication_year,doi,"
-                              "cited_by_count,type,primary_location,open_access,"
-                              "best_oa_location,authorships,ids,referenced_works"},
-        )
-        data = _pick_openalex_record(title, (res or {}).get("results") or [])
-        title_matched = True
-    else:
-        return None
-    if not data or not data.get("id"):
-        return None
-
-    meta = PaperMeta(sources=["openalex"], title_matched=title_matched)
-    meta.title = data.get("title") or data.get("display_name") or ""
-    meta.authors = [
-        (a.get("author") or {}).get("display_name", "")
-        for a in (data.get("authorships") or [])
-    ]
-    meta.authors = [a for a in meta.authors if a]
-    meta.year = data.get("publication_year")
-    meta.doi = normalize_doi(data.get("doi"))
-    meta.citation_count = data.get("cited_by_count")
-
-    loc = data.get("primary_location") or {}
-    src = loc.get("source") or {}
-    meta.venue = src.get("display_name")
-    meta.type = _map_openalex_type(data.get("type", ""), src.get("type"))
-
-    oa = data.get("open_access") or {}
-    meta.is_oa = bool(oa.get("is_oa"))
-    best = data.get("best_oa_location") or {}
-    meta.oa_pdf_url = best.get("pdf_url") or oa.get("oa_url")
-    meta.url = loc.get("landing_page_url") or data.get("id")
-
-    ids = data.get("ids") or {}
-    meta.pmcid = _pmcid(ids.get("pmcid"))
-    meta.arxiv_id = normalize_arxiv(meta.oa_pdf_url) if "arxiv" in str(meta.oa_pdf_url) else None
-
-    if with_references:
-        meta.references = _openalex_references(http, data.get("referenced_works") or [])
-    return meta
-
-
-def _openalex_references(http: HttpClient, ids: list[str], cap: int = 200) -> list[Reference]:
-    """Resolve OpenAlex work ids to titles in batches (50 ids per request)."""
-    out: list[Reference] = []
-    ids = [i.rsplit("/", 1)[-1] for i in ids[:cap]]
-    for i in range(0, len(ids), 50):
-        batch = ids[i:i + 50]
-        data = http.get_json(
-            OPENALEX_API,
-            params={
-                "filter": f"openalex_id:{'|'.join(batch)}",
-                "per-page": 50,
-                "select": "id,title,publication_year,doi,authorships",
-            },
-        )
-        for w in (data or {}).get("results") or []:
-            authors = [
-                (a.get("author") or {}).get("display_name", "")
-                for a in (w.get("authorships") or [])[:5]
-            ]
-            out.append(Reference(
-                title=w.get("title") or "",
-                year=w.get("publication_year"),
-                doi=normalize_doi(w.get("doi")),
-                authors=[a for a in authors if a],
-            ))
-    return [r for r in out if r.title]
-
-
-def from_semantic_scholar(http: HttpClient, ident: str, api_key: str = "",
-                          with_references: bool = True) -> PaperMeta | None:
-    """`ident` is an S2-style id: 'DOI:10.x/y', 'arXiv:1706.03762', or a hash."""
-    fields = ["title", "year", "venue", "publicationTypes", "citationCount",
+# What a paper record has to carry to be worth ranking: identity, the numbers
+# `quality.assess` grades on, and an abstract so a relevance pass is judging
+# content rather than guessing from a title.
+_S2_FIELDS = ["title", "year", "venue", "publicationTypes", "citationCount",
               "externalIds", "abstract", "openAccessPdf", "authors.name"]
-    if with_references:
-        fields += ["references.title", "references.year", "references.externalIds",
-                   "references.authors"]
-    headers = {"x-api-key": api_key} if api_key else None
-    data = http.get_json(
-        f"{S2_API}/{ident}", params={"fields": ",".join(fields)},
-        headers=headers, retries=2,
-    )
+_S2_REF_FIELDS = ["references.title", "references.year",
+                  "references.externalIds", "references.authors"]
+
+
+def _s2_headers(api_key: str) -> dict | None:
+    return {"x-api-key": api_key} if api_key else None
+
+
+def _s2_meta(data: dict, *, title_matched: bool = False) -> PaperMeta | None:
+    """One Semantic Scholar paper object as a `PaperMeta`.
+
+    Shared by identifier lookup, batch lookup and search, so a record means the
+    same thing however it was found.
+    """
     if not data or not data.get("title"):
         return None
-
-    meta = PaperMeta(sources=["semanticscholar"])
-    meta.title = data.get("title") or ""
+    meta = PaperMeta(sources=["semanticscholar"], title_matched=title_matched)
+    meta.title = _clean(data.get("title") or "")
     meta.authors = [a.get("name", "") for a in (data.get("authors") or [])]
     meta.authors = [a for a in meta.authors if a]
     meta.year = data.get("year")
     meta.venue = data.get("venue") or None
     meta.citation_count = data.get("citationCount")
-    meta.abstract = data.get("abstract") or ""
+    meta.abstract = _clean(data.get("abstract") or "")
     ext = data.get("externalIds") or {}
     meta.doi = normalize_doi(ext.get("DOI"))
     meta.arxiv_id = normalize_arxiv(ext.get("ArXiv"))
@@ -316,15 +253,16 @@ def from_semantic_scholar(http: HttpClient, ident: str, api_key: str = "",
     if oa.get("url"):
         meta.is_oa = True
         meta.oa_pdf_url = oa["url"]
-    types = data.get("publicationTypes") or []
-    meta.type = _map_s2_type(types, meta.venue)
+    meta.type = _map_s2_type(data.get("publicationTypes") or [], meta.venue)
+    if meta.arxiv_id and not meta.url:
+        meta.url = f"https://arxiv.org/abs/{meta.arxiv_id}"
 
     for r in (data.get("references") or []):
         if not r.get("title"):
             continue
         rext = r.get("externalIds") or {}
         meta.references.append(Reference(
-            title=r["title"],
+            title=_clean(r["title"])[:400],
             year=r.get("year"),
             doi=normalize_doi(rext.get("DOI")),
             arxiv_id=normalize_arxiv(rext.get("ArXiv")),
@@ -333,99 +271,142 @@ def from_semantic_scholar(http: HttpClient, ident: str, api_key: str = "",
     return meta
 
 
+def from_semantic_scholar(http: HttpClient, ident: str, api_key: str = "",
+                          with_references: bool = True) -> PaperMeta | None:
+    """`ident` is an S2-style id: 'DOI:10.x/y', 'arXiv:1706.03762', or a hash."""
+    fields = _S2_FIELDS + (_S2_REF_FIELDS if with_references else [])
+    data = http.get_json(
+        f"{S2_API}/{ident}", params={"fields": ",".join(fields)},
+        headers=_s2_headers(api_key), retries=2,
+    )
+    return _s2_meta(data) if data else None
+
+
+def batch_s2(http: HttpClient, idents: list[str], api_key: str = "",
+             with_references: bool = False) -> dict[str, PaperMeta]:
+    """Look up many papers at once, keyed by the identifier that was asked for.
+
+    This is the whole reason `find` can afford to weigh a large pool: one
+    request answers for up to 500 papers, where a per-paper lookup would be 500
+    round trips against an index that throttles at roughly one a second.
+
+    Identifiers nothing knows come back as `null` and are simply absent from the
+    result, so a caller can tell "no such record" from "the index never
+    answered" — the latter leaves the whole batch missing, not one entry.
+    """
+    out: dict[str, PaperMeta] = {}
+    idents = [i for i in idents if i]
+    if not idents:
+        return out
+    fields = _S2_FIELDS + (_S2_REF_FIELDS if with_references else [])
+    for i in range(0, len(idents), S2_BATCH_MAX):
+        chunk = idents[i:i + S2_BATCH_MAX]
+        data = http.post_json(
+            S2_BATCH_API, json={"ids": chunk},
+            params={"fields": ",".join(fields)},
+            headers=_s2_headers(api_key), retries=2,
+        )
+        if not isinstance(data, list):
+            continue
+        # The response is positional: entry n answers for id n, or is null.
+        # Not strict — a short or over-long response should cost us the entries
+        # we cannot line up, not the whole batch.
+        for ident, item in zip(chunk, data, strict=False):
+            meta = _s2_meta(item) if isinstance(item, dict) else None
+            if meta is not None:
+                out[ident] = meta
+    return out
+
+
+def s2_by_title(http: HttpClient, title: str, api_key: str = "",
+                with_references: bool = True) -> PaperMeta | None:
+    """Find a work by title when it has no identifier we can look it up by.
+
+    Marked `title_matched`, because a title search can land on a mirror or a
+    different paper of the same name: the citation count and reference list it
+    returns describe the right work, but its identifiers must not be adopted.
+    See `PaperMeta.supplementary`.
+    """
+    hits = search_semantic_scholar(http, title, limit=8, api_key=api_key,
+                                   with_references=with_references)
+    best = _best_title_match(title, hits, threshold=0.85)
+    if best is None:
+        return None
+    best.title_matched = True
+    return best
+
+
 # --------------------------------------------------------------------------
 # Search + orchestration
 # --------------------------------------------------------------------------
 
-_OA_SEARCH_SELECT = (
-    "id,title,publication_year,doi,cited_by_count,primary_location,"
-    "open_access,best_oa_location,type,authorships,abstract_inverted_index"
-)
+# Semantic Scholar's own name for a survey. Its `publicationTypes` vocabulary is
+# the only document-type filter `find` can push down into this index.
+S2_REVIEW_TYPE = "Review"
+# What the bulk endpoint is asked to order by for the most-cited facet.
+S2_SORT_CITED = "citationCount:desc"
 
 
-def search_openalex(http: HttpClient, query: str, *, limit: int = 10,
-                    sort: str | None = None, from_year: int | None = None,
-                    to_year: int | None = None,
-                    kind: str | None = None) -> list[PaperMeta]:
-    """Keyword search against OpenAlex, with the facets `find` discovers on.
+def search_semantic_scholar(http: HttpClient, query: str, *, limit: int = 10,
+                            sort: str | None = None,
+                            from_year: int | None = None,
+                            to_year: int | None = None,
+                            kind: str | None = None,
+                            api_key: str = "",
+                            with_references: bool = False) -> list[PaperMeta]:
+    """Keyword search against Semantic Scholar, with the facets `find` needs.
 
-    Free, structured, and hallucination-proof: every hit is a real indexed work
-    with its own identifiers and citation count. `sort`, the year window and
-    `kind` are what let one query be asked several different ways — most-cited,
-    published between two dates, reviews only — which is the cheap equivalent of
-    pointing several scout agents at different angles.
+    Every hit is a real indexed work carrying its own identifiers, venue and
+    citation count — the numbers that let importance be measured rather than
+    assumed. S2 also indexes arXiv preprints as first-class works, which is what
+    Crossref cannot do: in a field where the landmark result stays a preprint
+    for its first two years, an index that only knows DOI-registered work has no
+    opinion about the papers that matter most.
+
+    `sort` switches to the bulk endpoint, the only one that can order results.
+    That is what makes a "most-cited work on this topic" facet possible, and it
+    is the single most useful question to ask when someone wants the landmark
+    papers in an area rather than the closest keyword match.
     """
-    params: dict = {"search": query, "per-page": max(1, limit),
-                    "select": _OA_SEARCH_SELECT}
-    filters = []
-    if from_year:
-        filters.append(f"from_publication_date:{from_year}-01-01")
-    if to_year:
-        filters.append(f"to_publication_date:{to_year}-12-31")
-    if kind:
-        filters.append(f"type:{kind}")
-    if filters:
-        params["filter"] = ",".join(filters)
-    if sort:
-        params["sort"] = sort
+    fields = _S2_FIELDS + (_S2_REF_FIELDS if with_references else [])
+    params: dict = {"query": query, "fields": ",".join(fields)}
+    window = _s2_year_window(from_year, to_year)
+    if window:
+        params["year"] = window
+    if kind == S2_REVIEW_TYPE:
+        params["publicationTypes"] = S2_REVIEW_TYPE
 
-    data = http.get_json(OPENALEX_API, params=params)
+    if sort:
+        # The bulk endpoint pages at 1000 and has no `limit`; the slice at the
+        # end of this function is what actually bounds it.
+        params["sort"] = sort
+        url = S2_BULK_API
+    else:
+        params["limit"] = max(1, min(100, limit))
+        url = S2_SEARCH_API
+
+    # Retried as hard as anything else here: a search that gives up is a whole
+    # facet contributing nothing, and unauthenticated callers share one throttled
+    # pool with the world, so a 429 on the first try is routine rather than a
+    # sign the index is down.
+    data = http.get_json(url, params=params, headers=_s2_headers(api_key))
     out: list[PaperMeta] = []
-    for w in (data or {}).get("results") or []:
-        meta = _openalex_search_hit(w)
+    for w in (data or {}).get("data") or []:
+        meta = _s2_meta(w) if isinstance(w, dict) else None
         if meta is not None:
             out.append(meta)
     return out[:limit]
 
 
-def _openalex_search_hit(w: dict) -> PaperMeta | None:
-    title = w.get("title") or w.get("display_name") or ""
-    if not title:
-        return None
-    meta = PaperMeta(sources=["openalex"])
-    meta.title = title
-    meta.authors = [
-        a for a in (
-            (a.get("author") or {}).get("display_name", "")
-            for a in (w.get("authorships") or [])[:10]
-        ) if a
-    ]
-    meta.year = w.get("publication_year")
-    meta.doi = normalize_doi(w.get("doi"))
-    meta.citation_count = w.get("cited_by_count")
-    loc = w.get("primary_location") or {}
-    src = loc.get("source") or {}
-    meta.venue = src.get("display_name")
-    meta.type = _map_openalex_type(w.get("type", ""), src.get("type"))
-    oa = w.get("open_access") or {}
-    meta.is_oa = bool(oa.get("is_oa"))
-    best = w.get("best_oa_location") or {}
-    meta.oa_pdf_url = best.get("pdf_url") or oa.get("oa_url")
-    meta.url = loc.get("landing_page_url") or w.get("id")
-    if meta.oa_pdf_url and "arxiv" in str(meta.oa_pdf_url):
-        meta.arxiv_id = normalize_arxiv(meta.oa_pdf_url)
-    meta.abstract = _deinvert_abstract(w.get("abstract_inverted_index"))
-    return meta
-
-
-def _deinvert_abstract(index: dict | None) -> str:
-    """Rebuild OpenAlex's inverted abstract index into running text.
-
-    OpenAlex ships abstracts as {word: [positions]} rather than as a string.
-    Reassembling it costs nothing and gives the ranking call something to judge
-    beyond a bare title.
-    """
-    if not isinstance(index, dict) or not index:
-        return ""
-    words: list[tuple[int, str]] = []
-    for word, positions in index.items():
-        if not isinstance(positions, list):
-            continue
-        words += [(int(p), str(word)) for p in positions if isinstance(p, int)]
-    if not words:
-        return ""
-    words.sort()
-    return _clean(" ".join(w for _, w in words))
+def _s2_year_window(from_year: int | None, to_year: int | None) -> str:
+    """S2 spells a year window as '2020-2024', '2020-' or '-2024'."""
+    if from_year and to_year:
+        return f"{from_year}-{to_year}"
+    if from_year:
+        return f"{from_year}-"
+    if to_year:
+        return f"-{to_year}"
+    return ""
 
 
 def search_arxiv(http: HttpClient, query: str, *, limit: int = 10,
@@ -435,7 +416,7 @@ def search_arxiv(http: HttpClient, query: str, *, limit: int = 10,
 
     Relevance order only. arXiv's `all:` treats a multi-word query loosely, so
     sorting those matches by date returns whatever was submitted this morning
-    rather than recent work on the topic — recency is the OpenAlex facet's job,
+    rather than recent work on the topic — recency is the `recent` facet's job,
     where it is a filter on a real query rather than a sort over everything.
 
     A year window, when the query implies one, goes in as a `submittedDate`
@@ -466,30 +447,66 @@ def search_arxiv(http: HttpClient, query: str, *, limit: int = 10,
     return out[:limit]
 
 
-def search_works(http: HttpClient, query: str, limit: int = 10,
-                 cfg: FetchConfig | None = None, *,
-                 from_year: int | None = None,
-                 to_year: int | None = None) -> list[PaperMeta]:
-    """Title/keyword search. Crossref first, OpenAlex as a fallback."""
+# Crossref's own name for ordering by how often a work has been cited. It only
+# counts citations from DOI-registered works, so it undercounts badly in CS —
+# but it is the one most-cited ordering that is always available, and ordering
+# by an undercount still puts the heavily-cited work at the top.
+CROSSREF_SORT_CITED = "is-referenced-by-count"
+
+# Crossref document types, keyed by the vocabulary a search plan speaks.
+_CROSSREF_KINDS = {
+    "article": "journal-article",
+    "preprint": "posted-content",
+    "book": "book",
+    "book-chapter": "book-chapter",
+    "dataset": "dataset",
+    "dissertation": "dissertation",
+    "report": "report",
+}
+
+
+def search_crossref(http: HttpClient, query: str, limit: int = 10, *,
+                    sort: str | None = None,
+                    from_year: int | None = None,
+                    to_year: int | None = None,
+                    kind: str | None = None) -> list[PaperMeta]:
+    """Keyword search against Crossref.
+
+    Crossref has no daily budget and no shared throttle, so this is the one
+    index that answers whatever else is failing. It knows only DOI-registered
+    work, which means it cannot see an arXiv preprint until a publisher picks it
+    up — `search_semantic_scholar` and `search_arxiv` cover that gap.
+    """
     out: list[PaperMeta] = []
     params: dict = {
-        "query.bibliographic": query, "rows": limit,
+        "query.bibliographic": query, "rows": max(1, limit),
         # The abstract rides along because ranking a candidate pool from
         # bare titles is guesswork; it costs nothing extra to ask for.
         "select": "DOI,title,author,issued,container-title,type,"
                   "is-referenced-by-count,URL,abstract",
     }
-    window = [f"from-pub-date:{from_year}-01-01" if from_year else "",
-              f"until-pub-date:{to_year}-12-31" if to_year else ""]
-    if any(window):
-        params["filter"] = ",".join(f for f in window if f)
+    filters = [f"from-pub-date:{from_year}-01-01" if from_year else "",
+               f"until-pub-date:{to_year}-12-31" if to_year else ""]
+    if kind and (cr_kind := _CROSSREF_KINDS.get(kind)):
+        filters.append(f"type:{cr_kind}")
+    if any(filters):
+        params["filter"] = ",".join(f for f in filters if f)
+    if sort:
+        params["sort"] = sort
+        params["order"] = "desc"
+
     data = http.get_json(CROSSREF_API, params=params)
     for m in ((data or {}).get("message") or {}).get("items") or []:
         title = _first(m.get("title"))
         if not title:
             continue
         meta = PaperMeta(sources=["crossref"])
-        meta.title = title
+        # Crossref stores titles as submitted by the publisher, which for some
+        # of them means escaped HTML: a title arrives as "&lt;p&gt;Agent…" or
+        # carries a leading "&nbsp;". Left alone those reach the candidate table
+        # verbatim, and — worse — make two registrations of one paper hash to
+        # two different dedup keys, so the same work is offered twice.
+        meta.title = _strip_tags(title)
         meta.authors = [a for a in (_crossref_author(a) for a in m.get("author") or []) if a]
         meta.doi = normalize_doi(m.get("DOI"))
         meta.venue = _first(m.get("container-title"))
@@ -498,12 +515,24 @@ def search_works(http: HttpClient, query: str, limit: int = 10,
         meta.citation_count = m.get("is-referenced-by-count")
         meta.url = m.get("URL")
         meta.abstract = _strip_tags(m.get("abstract") or "")
-        out.append(meta)
+        if meta.title:
+            out.append(meta)
+    return out[:limit]
 
+
+def search_works(http: HttpClient, query: str, limit: int = 10,
+                 cfg: FetchConfig | None = None, *,
+                 from_year: int | None = None,
+                 to_year: int | None = None) -> list[PaperMeta]:
+    """Title/keyword search. Crossref first, Semantic Scholar as a fallback."""
+    cfg = cfg or FetchConfig()
+    out = search_crossref(http, query, limit, from_year=from_year, to_year=to_year)
     if len(out) < limit:
         seen = {m.doi for m in out if m.doi}
-        for meta in search_openalex(http, query, limit=limit,
-                                    from_year=from_year, to_year=to_year):
+        for meta in search_semantic_scholar(
+            http, query, limit=limit, from_year=from_year, to_year=to_year,
+            api_key=cfg.semantic_scholar_api_key,
+        ):
             if meta.doi and meta.doi in seen:
                 continue
             out.append(meta)
@@ -550,32 +579,6 @@ def resolve_metadata(
         if cr:
             meta = cr.merge(meta) if meta else cr
 
-        # OpenAlex then adds what Crossref does not do well: an open-access PDF
-        # link, and a citation count that counts citations from works with no
-        # DOI of their own (Crossref only counts DOI-registered ones, which
-        # undercounts in CS). Neither source is the last word on the count —
-        # S2 is consulted below and the largest figure wins.
-        # If Crossref already gave us references, skip resolving OpenAlex's —
-        # that is several extra requests for data we have.
-        need_refs = with_references and not (meta and meta.references)
-        oa = from_openalex(http, doi=doi, with_references=need_refs)
-        if oa:
-            meta = meta.merge(oa) if meta else oa
-
-    elif arxiv_id and meta is not None:
-        # arXiv-only work: the arXiv API reports no venue and no citation count,
-        # which would leave the level scorer with nothing to work from. Look the
-        # title up in OpenAlex to recover citations and references.
-        #
-        # This match is made on title alone, so it is treated as supplementary,
-        # not authoritative: it fills blanks in the arXiv record and never
-        # overwrites it. In particular the DOI OpenAlex reports here is not
-        # chased through Crossref — a near-title match can land on a different
-        # paper of the same name, and a wrong DOI would poison the whole entry.
-        oa = from_openalex(http, title=meta.title, with_references=with_references)
-        if oa:
-            meta.merge(oa.supplementary())
-
     if meta is None and arxiv_id:
         meta = from_arxiv(http, arxiv_id)
 
@@ -585,16 +588,15 @@ def resolve_metadata(
     if arxiv_id and not meta.arxiv_id:
         meta.arxiv_id = arxiv_id
 
-    # Semantic Scholar last: for a reference list when nothing else supplied
-    # one, and — always — for a citation count.
+    # Semantic Scholar last, and always: for the citation count, for an
+    # open-access PDF link Crossref does not carry, and for a reference list
+    # when nothing else supplied one.
     #
-    # OpenAlex keeps arXiv-only work as a bare preprint record that the citing
-    # literature never points at, so its count for those papers is close to
-    # meaningless: 9 for GAIA and 53 for AgentBench, against 1032 and 1090 at
-    # S2. `quality.assess` grades a preprint on citations per year and nothing
-    # else, so those figures put landmark benchmarks two to three levels low or
-    # under the B threshold entirely, where they fell through to the reader
-    # agent's judgement. A count is worth one request per paper on its own.
+    # The count is worth a request per paper on its own. Crossref counts only
+    # citations from DOI-registered works, which in CS means a landmark preprint
+    # reads as barely cited — and `quality.assess` grades a preprint on citation
+    # velocity and nothing else, so an undercount puts it two or three levels
+    # low, or under the B threshold entirely.
     ident = (f"DOI:{meta.doi}" if meta.doi
              else f"arXiv:{meta.arxiv_id}" if meta.arxiv_id else None)
     if ident:
@@ -604,6 +606,16 @@ def resolve_metadata(
         )
         if s2:
             meta.merge(s2)
+    elif meta.title:
+        # No identifier to look the work up by — all we have is a title, so the
+        # match is supplementary rather than authoritative: it fills in the
+        # citation count and references and never overwrites identity, because a
+        # near-title match can land on a different paper of the same name and a
+        # wrong DOI would poison the whole entry. See `PaperMeta.supplementary`.
+        s2 = s2_by_title(http, meta.title, cfg.semantic_scholar_api_key,
+                         with_references=with_references and not meta.references)
+        if s2:
+            meta.merge(s2.supplementary())
 
     if meta.doi and not meta.bibtex:
         meta.bibtex = crossref_bibtex(http, meta.doi)
@@ -667,7 +679,15 @@ def _clean(s: str) -> str:
 
 
 def _strip_tags(s: str) -> str:
-    return _clean(re.sub(r"<[^>]+>", " ", s or ""))
+    """Plain text from a field a publisher may have filled with escaped markup.
+
+    Crossref returns some titles and most abstracts as HTML, and a fair number
+    of those are *escaped* HTML — "&lt;p&gt;Agentic and…" or a leading "&nbsp;".
+    Unescaping has to come first and then again after the tags are gone, since
+    one pass only turns `&amp;nbsp;` into `&nbsp;`.
+    """
+    s = re.sub(r"<[^>]+>", " ", html.unescape(s or ""))
+    return _clean(html.unescape(s))
 
 
 def _crossref_author(a: dict) -> str:
@@ -710,20 +730,6 @@ def _map_crossref_type(t: str, venue: str | None) -> str:
     }.get(t, "other")
 
 
-def _map_openalex_type(t: str, source_type: str | None) -> str:
-    t = (t or "").lower()
-    if t == "article":
-        return "preprint" if source_type == "repository" else "journal article"
-    return {
-        "preprint": "preprint",
-        "book": "book",
-        "book-chapter": "book chapter",
-        "dissertation": "thesis",
-        "report": "report",
-        "proceedings-article": "conference paper",
-    }.get(t, "other")
-
-
 def _map_s2_type(types: list[str], venue: str | None) -> str:
     types = [t.lower() for t in (types or [])]
     if "conference" in types:
@@ -741,54 +747,36 @@ def _is_workshop(venue: str | None) -> bool:
     return "workshop" in (venue or "").lower()
 
 
-def _pick_openalex_record(title: str, results: list[dict]) -> dict | None:
-    """Choose the canonical OpenAlex record for a work from title-search hits.
+def _best_title_match(query: str, cands: list[PaperMeta], *,
+                      threshold: float = 0.5) -> PaperMeta | None:
+    """Pick the candidate whose title best overlaps the query (token F1).
 
-    Requires a close title match first — "Attention Is All You Need" must not
-    match "Channel Attention Is All You Need for Video Frames" — then prefers
-    the most-cited of the survivors, which is the record other works point at.
+    Ties break toward the most-cited, which is the record the rest of the
+    literature actually points at when an index holds several copies of one
+    work. `threshold` is raised by callers that will treat the answer as the
+    work itself: "Attention Is All You Need" must not match "Channel Attention
+    Is All You Need for Video Frames".
     """
-    from ..models import slugify
-
-    target = slugify(title, 200)
-    q = set(re.findall(r"[a-z0-9]+", title.lower()))
-    scored: list[tuple[float, int, dict]] = []
-    for w in results:
-        wt = w.get("title") or w.get("display_name") or ""
-        if not wt:
-            continue
-        if slugify(wt, 200) == target:
-            sim = 1.0
-        else:
-            t = set(re.findall(r"[a-z0-9]+", wt.lower()))
-            if not t:
-                continue
-            sim = 2 * len(q & t) / (len(q) + len(t))
-        if sim < 0.85:
-            continue
-        scored.append((sim, w.get("cited_by_count") or 0, w))
-    if not scored:
-        return None
-    scored.sort(key=lambda s: (-s[0], -s[1]))
-    return scored[0][2]
-
-
-def _best_title_match(query: str, cands: list[PaperMeta]) -> PaperMeta | None:
-    """Pick the candidate whose title best overlaps the query (token F1)."""
     from ..models import slugify
 
     q = set(re.findall(r"[a-z0-9]+", query.lower()))
     if not q:
         return cands[0] if cands else None
-    best, best_score = None, 0.0
+    target = slugify(query, 200)
+    scored: list[tuple[float, int, PaperMeta]] = []
     for c in cands:
-        if slugify(c.title, 200) == slugify(query, 200):
-            return c
-        t = set(re.findall(r"[a-z0-9]+", c.title.lower()))
-        if not t:
+        if not c.title:
             continue
-        inter = len(q & t)
-        score = 2 * inter / (len(q) + len(t))
-        if score > best_score:
-            best, best_score = c, score
-    return best if best_score >= 0.5 else None
+        if slugify(c.title, 200) == target:
+            score = 1.0
+        else:
+            t = set(re.findall(r"[a-z0-9]+", c.title.lower()))
+            if not t:
+                continue
+            score = 2 * len(q & t) / (len(q) + len(t))
+        if score >= threshold:
+            scored.append((score, c.citation_count or 0, c))
+    if not scored:
+        return None
+    scored.sort(key=lambda s: (-s[0], -s[1]))
+    return scored[0][2]

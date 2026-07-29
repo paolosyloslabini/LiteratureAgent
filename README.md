@@ -101,7 +101,7 @@ Every command takes `--json`, so scripts and agents can use all of it.
 ### Adding a paper is a read, not a lookup
 
 `lit add` resolves the work through Crossref (authoritative, and usually
-sufficient on its own), topping up from arXiv, OpenAlex and Semantic Scholar for
+sufficient on its own), topping up from arXiv and Semantic Scholar for
 citation counts, open-access PDF links and reference lists. It then retrieves
 the full text — arXiv, PMC/Europe PMC, Unpaywall and publisher OA links, or a
 PDF you supply — and hands the entire document to a single agent that writes the
@@ -193,8 +193,8 @@ everything is free:
 1. **Reference mining** — hallucination-proof. Works cited by several papers
    already in your library, but missing from it, are exactly the gaps worth
    filling.
-2. **Indexed search** across Crossref, OpenAlex and arXiv. The planned query is
-   asked five ways — best keyword match, most-cited, published in the last two
+2. **Indexed search** across Crossref, Semantic Scholar and arXiv. The planned
+   query is asked five ways — best keyword match, most-cited, published in the last two
    years, reviews only, arXiv preprints — because one query asked one way
    returns a monoculture. Alternate phrasings are asked on best-match only:
    re-running "most-cited" over a paraphrase returns what the first phrasing
@@ -224,7 +224,8 @@ The pool is then ranked on **relevance** to what you asked (65%) and
   question cannot take a slot on reputation.
 - *Importance* is computed, not judged: citation velocity and venue rank (the
   same metrics behind the levels below). Indexed hits arrive carrying those
-  figures; anything else gets one free OpenAlex lookup **before** the cut.
+  figures; anything else is filled in by one batched Semantic Scholar lookup
+  **before** the cut.
   Papers from the last two years are scored on venue alone, so new work is not
   buried for having had no time to accumulate citations, and a paper nothing is
   known about is treated as middling rather than worthless. Co-citation in your
@@ -408,7 +409,7 @@ citation, and never to write to your notes.
 ## Paywalls
 
 Out of the box `lit` uses open-access routes only: arXiv, PMC/Europe PMC,
-Unpaywall, OpenAlex OA links and publisher OA pages. For anything else, download
+Unpaywall, open-access links from the indexes, and publisher OA pages. For anything else, download
 the PDF yourself with whatever access you have and either:
 
 ```bash

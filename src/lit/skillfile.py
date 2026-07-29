@@ -99,7 +99,7 @@ lit read --all --level A -n 5 --json         # or work through the backlog
 ```
 
 - `add` fetches one paper, reads the **whole text**, and writes the summaries.
-- `find` searches Crossref, OpenAlex and arXiv several ways, mines the reference
+- `find` searches Crossref, Semantic Scholar and arXiv several ways, mines the reference
   lists of papers already in the library, de-duplicates everything, and ranks it
   with one cheap call. It **files papers without reading them**: they get their
   metadata, abstract and level, and `status: unread`. This is cheap — prefer it,

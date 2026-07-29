@@ -10,9 +10,11 @@ from lit.fetch.fulltext import (
     truncate_for_llm,
 )
 from lit.fetch.metadata import (
-    _pick_openalex_record,
+    _best_title_match,
+    _strip_tags,
     search_arxiv,
-    search_openalex,
+    search_crossref,
+    search_semantic_scholar,
     search_works,
     synth_bibtex,
 )
@@ -149,28 +151,53 @@ def test_synth_bibtex_survives_missing_fields():
 
 
 # --------------------------------------------------------------------------
-# Choosing the canonical OpenAlex record among duplicates
+# Choosing the canonical record for a work among duplicate registrations
 # --------------------------------------------------------------------------
 
-def test_openalex_picks_the_most_cited_exact_title_match():
-    results = [
-        {"title": "Attention Is All You Need", "cited_by_count": 10},
-        {"title": "Attention Is All You Need", "cited_by_count": 6597},
+def test_title_match_picks_the_most_cited_exact_match():
+    """An index holds several copies of one work; the canonical one is the
+    record the rest of the literature actually points at."""
+    cands = [
+        make_meta(title="Attention Is All You Need", citation_count=10),
+        make_meta(title="Attention Is All You Need", citation_count=6597),
     ]
-    assert _pick_openalex_record("Attention Is All You Need", results)["cited_by_count"] \
-        == 6597
+    best = _best_title_match("Attention Is All You Need", cands, threshold=0.85)
+    assert best.citation_count == 6597
 
 
-def test_openalex_rejects_a_similar_but_different_paper():
-    results = [
-        {"title": "Channel Attention Is All You Need for Video Frame Interpolation",
-         "cited_by_count": 900},
-    ]
-    assert _pick_openalex_record("Attention Is All You Need", results) is None
+def test_title_match_rejects_a_similar_but_different_paper():
+    cands = [make_meta(
+        title="Channel Attention Is All You Need for Video Frame Interpolation",
+        citation_count=900)]
+    assert _best_title_match("Attention Is All You Need", cands,
+                             threshold=0.85) is None
 
 
-def test_openalex_returns_none_for_no_results():
-    assert _pick_openalex_record("Anything", []) is None
+def test_title_match_returns_none_for_no_results():
+    assert _best_title_match("Anything", [], threshold=0.85) is None
+
+
+# --------------------------------------------------------------------------
+# Publisher-escaped markup in Crossref fields
+# --------------------------------------------------------------------------
+
+def test_escaped_html_is_decoded_out_of_a_title():
+    """Crossref returns some titles as escaped HTML. Left alone they reach the
+    candidate table verbatim and split one work across two dedup keys."""
+    assert _strip_tags("&lt;p&gt;Agentic and Multi-agent Systems&lt;/p&gt;") \
+        == "Agentic and Multi-agent Systems"
+
+
+def test_double_escaped_entities_are_decoded():
+    # One unescape pass turns "&amp;nbsp;" into "&nbsp;", which is still not text.
+    assert _strip_tags("&amp;nbsp;Agent Brain") == "Agent Brain"
+
+
+def test_crossref_search_decodes_titles():
+    http = RecordingHttp({"message": {"items": [
+        {"title": ["&lt;p&gt;A Benchmark&lt;/p&gt;"], "DOI": "10.1/x"},
+    ]}})
+    assert search_crossref(http, "topic")[0].title == "A Benchmark"
 
 
 # --------------------------------------------------------------------------
@@ -289,23 +316,48 @@ class RecordingHttp:
         return self.calls[0][1]
 
 
-def test_openalex_search_sends_the_year_window():
+def test_s2_search_sends_the_year_window():
     http = RecordingHttp()
-    search_openalex(http, "topic", from_year=2020, to_year=2024)
-    assert "from_publication_date:2020-01-01" in http.params["filter"]
-    assert "to_publication_date:2024-12-31" in http.params["filter"]
+    search_semantic_scholar(http, "topic", from_year=2020, to_year=2024)
+    assert http.params["year"] == "2020-2024"
 
 
-def test_openalex_search_sends_the_document_type():
+def test_s2_search_sends_an_open_ended_window():
     http = RecordingHttp()
-    search_openalex(http, "topic", kind="review")
-    assert "type:review" in http.params["filter"]
-
-
-def test_openalex_search_without_constraints_sends_no_filter():
+    search_semantic_scholar(http, "topic", from_year=2020)
+    assert http.params["year"] == "2020-"
     http = RecordingHttp()
-    search_openalex(http, "topic")
-    assert "filter" not in http.params
+    search_semantic_scholar(http, "topic", to_year=2024)
+    assert http.params["year"] == "-2024"
+
+
+def test_s2_search_sends_the_document_type():
+    http = RecordingHttp()
+    search_semantic_scholar(http, "topic", kind="Review")
+    assert http.params["publicationTypes"] == "Review"
+
+
+def test_s2_search_without_constraints_sends_no_window():
+    http = RecordingHttp()
+    search_semantic_scholar(http, "topic")
+    assert "year" not in http.params
+    assert "publicationTypes" not in http.params
+
+
+def test_s2_sorted_search_uses_the_bulk_endpoint():
+    """Only the bulk endpoint can order results, and ordering by citation count
+    is the whole of the most-cited facet."""
+    http = RecordingHttp()
+    search_semantic_scholar(http, "topic", sort="citationCount:desc")
+    url, params = http.calls[0]
+    assert url.endswith("/search/bulk")
+    assert params["sort"] == "citationCount:desc"
+
+
+def test_s2_unsorted_search_uses_the_relevance_endpoint():
+    http = RecordingHttp()
+    search_semantic_scholar(http, "topic")
+    assert http.calls[0][0].endswith("/paper/search")
 
 
 def test_crossref_search_sends_the_year_window():
@@ -326,12 +378,27 @@ def test_crossref_search_without_a_window_sends_no_filter():
     assert "filter" not in http.params
 
 
-def test_the_window_reaches_the_openalex_fallback_too():
+def test_crossref_search_sends_the_document_type():
+    http = RecordingHttp()
+    search_crossref(http, "topic", 5, kind="preprint")
+    assert "type:posted-content" in http.params["filter"]
+
+
+def test_crossref_search_can_order_by_citation_count():
+    """Crossref's count undercounts CS badly, but ordering by an undercount
+    still puts the heavily-cited work on top — and it is always reachable."""
+    http = RecordingHttp()
+    search_crossref(http, "topic", 5, sort="is-referenced-by-count")
+    assert http.params["sort"] == "is-referenced-by-count"
+    assert http.params["order"] == "desc"
+
+
+def test_the_window_reaches_the_s2_fallback_too():
     """Crossref coming back short must not silently drop the constraint."""
     http = RecordingHttp()
     search_works(http, "topic", 5, from_year=2020)
-    fallback = [p for url, p in http.calls if "openalex" in url]
-    assert fallback and "from_publication_date:2020-01-01" in fallback[0]["filter"]
+    fallback = [p for url, p in http.calls if "semanticscholar" in url]
+    assert fallback and fallback[0]["year"] == "2020-"
 
 
 def test_arxiv_search_sends_the_year_window_as_a_submission_range():
@@ -352,21 +419,21 @@ def test_arxiv_search_without_a_window_stays_a_plain_query():
 # --------------------------------------------------------------------------
 
 def test_merge_takes_the_larger_citation_count():
-    """OpenAlex holds arXiv-only work as a bare preprint record the citing
-    literature never points at, so its count runs orders of magnitude low: 9 for
+    """Crossref counts only citations from DOI-registered work, so for a paper
+    the field cites as a preprint its count runs orders of magnitude low: 9 for
     GAIA against 1032 at S2. Filling only when the field is empty would keep
     whichever source answered first."""
-    openalex = make_meta(citation_count=9)
+    crossref = make_meta(citation_count=9)
     s2 = make_meta(citation_count=1032)
 
-    assert openalex.merge(s2).citation_count == 1032
+    assert crossref.merge(s2).citation_count == 1032
 
 
 def test_merge_does_not_let_a_thinner_index_lower_the_count():
     s2 = make_meta(citation_count=1032)
-    openalex = make_meta(citation_count=9)
+    crossref = make_meta(citation_count=9)
 
-    assert s2.merge(openalex).citation_count == 1032
+    assert s2.merge(crossref).citation_count == 1032
 
 
 def test_merge_still_adopts_a_count_when_it_has_none():
@@ -375,10 +442,10 @@ def test_merge_still_adopts_a_count_when_it_has_none():
 
 
 def test_resolve_asks_s2_for_a_count_even_when_references_are_in_hand(monkeypatch):
-    """The count is worth its own request. S2 used to be a references-only
-    fallback, so a paper whose references OpenAlex had already supplied never
-    reached it and kept the preprint-record count — which left GAIA on 9
-    citations, three citations/year, below the B threshold in `quality.assess`."""
+    """The count is worth its own request. S2 must not be treated as a
+    references-only fallback: a paper whose references another source already
+    supplied still needs the count, or GAIA stays on 9 citations — three a year,
+    below the B threshold in `quality.assess`."""
     from lit.models import Reference
     import lit.fetch.metadata as md
 
@@ -387,26 +454,41 @@ def test_resolve_asks_s2_for_a_count_even_when_references_are_in_hand(monkeypatc
     def fake_arxiv(http, arxiv_id):
         return make_meta(title="GAIA: a benchmark for General AI Assistants",
                          doi=None, venue=None, year=2023, type="preprint",
-                         arxiv_id=arxiv_id, citation_count=None, references=[])
-
-    def fake_openalex(http, **kw):
-        calls.append("openalex")
-        m = make_meta(title="GAIA: a benchmark for General AI Assistants",
-                      doi=None, venue=None, year=2023, citation_count=9,
-                      references=[Reference(title="A cited work")])
-        m.title_matched = True
-        return m
+                         arxiv_id=arxiv_id, citation_count=None,
+                         references=[Reference(title="A cited work")])
 
     def fake_s2(http, ident, api_key="", with_references=True):
         calls.append(("s2", ident, with_references))
         return make_meta(citation_count=1032, references=[])
 
     monkeypatch.setattr(md, "from_arxiv", fake_arxiv)
-    monkeypatch.setattr(md, "from_openalex", fake_openalex)
     monkeypatch.setattr(md, "from_semantic_scholar", fake_s2)
 
     meta = md.resolve_metadata(http=None, arxiv_id="2311.12983")
 
     assert meta.citation_count == 1032
-    # ...and we did not pay for a reference list OpenAlex had already given us.
+    # ...and we did not pay for a reference list we already had.
     assert ("s2", "arXiv:2311.12983", False) in calls
+
+
+def test_resolve_falls_back_to_a_title_search_with_no_identifier(monkeypatch):
+    """A work with neither DOI nor arXiv id still needs a citation count, but a
+    title match can land on a different paper of the same name — so what it
+    returns is supplementary and must never overwrite identity."""
+    import lit.fetch.metadata as md
+
+    def fake_search(http, query, limit=10, cfg=None, **kw):
+        return [make_meta(title="Some Paper", doi=None, arxiv_id=None,
+                          citation_count=None)]
+
+    def fake_by_title(http, title, api_key="", with_references=True):
+        return make_meta(title="Some Paper", doi="10.9999/mirror",
+                         citation_count=77, title_matched=True)
+
+    monkeypatch.setattr(md, "search_works", fake_search)
+    monkeypatch.setattr(md, "s2_by_title", fake_by_title)
+
+    meta = md.resolve_metadata(http=None, title="Some Paper")
+
+    assert meta.citation_count == 77
+    assert meta.doi is None  # the mirror's DOI was not adopted
