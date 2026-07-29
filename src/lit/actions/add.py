@@ -445,7 +445,7 @@ def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
     for s in entry.sections:
         s.summary = _clip_words(s.summary, SECTION_WORDS_CEILING)
     entry.key_findings = [
-        str(f).strip() for f in (data.get("key_findings") or []) if str(f).strip()
+        " ".join(str(f).split()) for f in (data.get("key_findings") or []) if str(f).strip()
     ][:MAX_KEY_FINDINGS]
 
     tags = _norm_tags(list(data.get("tags") or []) + list(extra_tags or []))

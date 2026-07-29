@@ -54,6 +54,16 @@ def test_the_abstract_does_not_leak_into_the_detailed_summary(entry):
     assert parsed.key_findings == entry.key_findings
 
 
+def test_a_multi_line_key_finding_survives_a_save_round_trip(entry, tmp_path):
+    # A finding is written as one `- ` bullet and read back the same way, so a
+    # newline inside one used to drop the caveat after it — and the next save
+    # wrote the truncated version back to disk.
+    path = tmp_path / "e.md"
+    entry.key_findings = ["Accuracy rose 3%.\nOnly on ImageNet."]
+    entryfile.save(path, entry)
+    assert entryfile.load(path).key_findings == ["Accuracy rose 3%. Only on ImageNet."]
+
+
 def test_round_trip_preserves_sections(entry):
     parsed = entryfile.loads(entryfile.dumps(entry))
     assert [s.name for s in parsed.sections] == ["Introduction", "Model Architecture"]
