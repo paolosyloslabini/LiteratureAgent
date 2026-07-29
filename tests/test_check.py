@@ -201,17 +201,32 @@ def test_arxiv_year_comes_from_the_identifier(arxiv_id, year):
 # What gets checked at all
 # --------------------------------------------------------------------------
 
-def test_a_clean_entry_costs_nothing(ctx, lib, monkeypatch):
-    llm = wire(ctx, monkeypatch)
-    res = check_entries(ctx, [lib.save_entry(make_entry())])[0]
+def test_an_entry_that_looks_fine_is_still_checked(ctx, lib, monkeypatch):
+    """The point of the command: code does not get to decide it looks fine.
 
-    assert res.status == "clean"
-    assert llm.calls == 0
-
-
-def test_force_checks_an_entry_that_looks_fine(ctx, lib, monkeypatch):
+    `make_entry()` passes the local audit cleanly, and is checked anyway —
+    running `check` is the statement that the stored record is not trusted.
+    """
     llm = wire(ctx, monkeypatch, {"fields": []})
-    check_entries(ctx, [lib.save_entry(make_entry())], force=True)
+    entry = lib.save_entry(make_entry())
+    assert audit(entry) == []
+
+    res = check_entries(ctx, [entry])[0]
+
+    assert llm.calls == 1
+    assert res.asked_model
+    assert res.status != "clean"
+
+
+def test_the_agent_is_asked_even_when_the_indexes_already_fixed_it(
+        ctx, lib, monkeypatch):
+    """A free index correction is not a reason to skip the second opinion."""
+    llm = wire(ctx, monkeypatch, {"fields": []},
+               meta=make_meta(venue="Advances in Neural Information Processing "
+                                    "Systems"))
+    entry = lib.save_entry(make_entry(venue="Elsevier BV"))
+
+    check_entries(ctx, [entry], fix=True)
 
     assert llm.calls == 1
 
@@ -247,17 +262,15 @@ def test_nothing_to_do_costs_nothing(ctx, monkeypatch):
 # The indexes get asked before the model
 # --------------------------------------------------------------------------
 
-def test_a_publisher_venue_is_fixed_from_the_indexes_without_the_model(
-        ctx, lib, monkeypatch):
-    """The cheapest correct answer: ask the index again with the id we now have."""
-    llm = wire(ctx, monkeypatch, meta=make_meta(
+def test_a_publisher_venue_is_fixed_from_the_indexes(ctx, lib, monkeypatch):
+    """The indexes are asked first because they are free and authoritative."""
+    wire(ctx, monkeypatch, {"fields": []}, meta=make_meta(
         venue="Advances in Neural Information Processing Systems"))
     entry = lib.save_entry(make_entry(venue="Elsevier BV"))
 
     res = check_entries(ctx, [entry], fix=True)[0]
 
     assert res.status == "fixed"
-    assert llm.calls == 0  # no tokens spent on what the index settled
     assert lib.get(entry.key).venue == (
         "Advances in Neural Information Processing Systems")
 

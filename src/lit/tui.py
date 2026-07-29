@@ -27,6 +27,7 @@ from textual.widgets import (
 
 from . import entryfile
 from .actions.add import reread
+from .actions.check import audit, check_entries
 from .actions.code import find_code
 from .actions.context import Ctx
 from .config import Config
@@ -158,6 +159,58 @@ class ConfirmFindCode(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ConfirmCheck(ModalScreen[bool]):
+    """Verifying a record spends one cheap agent, and then rewrites fields.
+
+    The browser is where a check is worth having by default: you are looking at
+    one entry, you can see the venue that looks wrong, and the correction lands
+    in front of you. So unlike the CLI — which reports and needs `--fix` — this
+    applies what it confirms, and the prompt is where that is made plain.
+    """
+
+    BINDINGS = [
+        Binding("y", "confirm", "Check"),
+        Binding("enter", "confirm", "Check", show=False),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("n", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, entry: Entry):
+        super().__init__()
+        self.entry = entry
+
+    def body_text(self) -> str:
+        """What the prompt says. Pure, so it can be tested on its own."""
+        head = (
+            f"{self.entry.title[:200]}\n\n"
+            f"[dim]{self.entry.citation()}[/dim]\n\n"
+            "Sends one cheap agent to check this record's venue, year and type "
+            "against the published source, and applies the corrections it can "
+            "confirm. Runs in the background; the browser stays usable."
+        )
+        problems = audit(self.entry)
+        if problems:
+            listed = "\n".join(f"  · {p.problem}" for p in problems[:5])
+            head += f"\n\n[yellow]Already looks off from here:[/yellow]\n{listed}"
+        head += (
+            "\n\n[dim]Bibliographic fields only — summaries, the abstract and "
+            "your notes are never touched.[/dim]"
+        )
+        return head
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Static("Check this entry's metadata?", id="confirm-title")
+            yield Static(self.body_text(), id="confirm-body")
+            yield Static("[dim]y check · esc cancel[/dim]", id="confirm-help")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class ConfirmDelete(ModalScreen[bool]):
     """Deleting is the one thing in here that cannot be undone.
 
@@ -241,6 +294,7 @@ class BrowserApp(App):
         Binding("o", "open_link", "Open"),
         Binding("c", "open_code", "Code"),
         Binding("C", "find_code", "Find code"),
+        Binding("M", "check_entry", "Check metadata"),
         Binding("f", "cycle_filter", "Filter"),
         Binding("s", "cycle_sort", "Sort"),
         Binding("r", "reload", "Reload"),
@@ -277,12 +331,14 @@ class BrowserApp(App):
         self.reading: set[str] = set()
         # Keys a code scout is searching the web for right now.
         self.finding: set[str] = set()
+        # Keys whose metadata an agent is verifying right now.
+        self.checking: set[str] = set()
         self._quit_warned = False
 
     @property
     def busy(self) -> set[str]:
         """Keys with a background agent working on them, of any kind."""
-        return self.reading | self.finding
+        return self.reading | self.finding | self.checking
 
     # ---------------- layout ----------------
 
@@ -361,6 +417,8 @@ class BrowserApp(App):
             return "reading…"
         if entry.key in self.finding:
             return "code…"
+        if entry.key in self.checking:
+            return "checking…"
         if entry.is_verified:
             return "read"
         return "unread" if entry.is_unread else "UNVERIFIED"
@@ -377,6 +435,8 @@ class BrowserApp(App):
             bits.append(f"reading: {', '.join(sorted(self.reading))}")
         if self.finding:
             bits.append(f"finding code: {', '.join(sorted(self.finding))}")
+        if self.checking:
+            bits.append(f"checking: {', '.join(sorted(self.checking))}")
         self.query_one("#status", Static).update(" · ".join(bits))
 
     def detail_markdown(self, entry: Entry) -> str:
@@ -626,6 +686,68 @@ class BrowserApp(App):
     def _find_code_finished(self, key: str, ok: bool, message: str,
                             cost: str) -> None:
         self.finding.discard(key)
+        if not self.busy:
+            self._quit_warned = False
+        self.action_reload()
+        self.notify(
+            message + (f"\n{cost}" if cost else ""),
+            severity="information" if ok else "warning",
+            timeout=12,
+        )
+
+    # ---------------- checking metadata ----------------
+
+    def action_check_entry(self) -> None:
+        """Verify this entry's record — the browser's `lit check <key> --fix`."""
+        entry = self.current()
+        if entry is None:
+            return
+        if entry.key in self.checking:
+            self.notify(f"already checking {entry.key}", severity="warning")
+            return
+        self.push_screen(ConfirmCheck(entry), partial(self._check_confirmed, entry))
+
+    def _check_confirmed(self, entry: Entry, confirmed: bool | None) -> None:
+        if confirmed:
+            self.start_check(entry)
+
+    def start_check(self, entry: Entry) -> None:
+        """Run one metadata check in a background thread."""
+        self.checking.add(entry.key)
+        self.refresh_rows()
+        self.notify(f"checking {entry.key}'s metadata")
+        self.run_worker(
+            partial(self._check_worker, entry.key),
+            thread=True, group="check", name=f"check:{entry.key}",
+        )
+
+    def _check_worker(self, key: str) -> None:
+        ctx = Ctx(cfg=self.cfg, library=self.library, console=Console(quiet=True),
+                  yes=True)
+        cost = ""
+        try:
+            entry = self.library.get(key)
+            if entry is None:
+                ok, message = False, f"{key} is no longer in the library"
+            else:
+                # fix=True: the prompt said the corrections would be applied.
+                res = check_entries(ctx, [entry], fix=True)[0]
+                ok = res.ok
+                message = f"{key}: " + (
+                    "; ".join(res.changes) if res.changes
+                    else (res.message or res.status)
+                )
+                if res.unresolved:
+                    message += "\nstill unconfirmed: " + "; ".join(res.unresolved[:3])
+                cost = ctx.usage.summary()
+        except Exception as exc:
+            ok, message = False, f"{key}: {exc}"
+        finally:
+            ctx.close()
+        self.call_from_thread(self._check_finished, key, ok, message, cost)
+
+    def _check_finished(self, key: str, ok: bool, message: str, cost: str) -> None:
+        self.checking.discard(key)
         if not self.busy:
             self._quit_warned = False
         self.action_reload()

@@ -863,8 +863,6 @@ def cmd_check(
         None, help="Entry keys to check. Omit to audit the whole library."),
     fix: bool = typer.Option(
         False, "--fix", help="Apply the corrections that could be confirmed."),
-    force: bool = typer.Option(
-        False, "--force", help="Check every entry, including ones that look fine."),
     limit: int = typer.Option(
         0, "-n", "--limit", help="Stop after this many (best levels first)."),
     level: Optional[str] = typer.Option(
@@ -872,16 +870,21 @@ def cmd_check(
     tag: Optional[str] = typer.Option(
         None, "--tag", help="Only entries carrying this tag."),
 ):
-    """Verify metadata that looks wrong, and optionally correct it.
+    """Have an agent verify an entry's metadata against the published source.
 
-    Audits entries in code first — a publisher's name where a venue belongs, no
-    citations recorded for a decade-old paper, a year that predates the paper's
-    own preprint — then re-asks the metadata indexes, and spends one cheap agent
-    only on what they cannot settle. An entry nothing looks wrong with costs
-    nothing.
+    One cheap agent per entry, always: running this is the statement that the
+    stored record is not trusted, so nothing here decides in code that an entry
+    looks fine and skips the call. The metadata indexes are re-asked first
+    because that is free, and a local consistency check rides along as a hint to
+    the agent — neither of them replaces it.
+
+    Scope is yours to set: give keys, or narrow the library with --level, --tag
+    and -n. `lit browse` checks one entry at a time with `M`.
 
     Reports by default. `--fix` writes, and only ever to bibliographic fields:
-    summaries, abstracts and your notes are never touched.
+    summaries, abstracts and your notes are never touched. Citation counts and
+    author lists are never taken from the agent at all — those come from the
+    indexes, because a fabricated number cannot be told from a real one.
     """
     if level and level not in LEVELS:
         _fail(f"--level must be one of {LEVELS}")
@@ -918,7 +921,7 @@ def cmd_check(
                 console.print(f"[dim]{msg}[/dim]")
             return
 
-        results = check_entries(ctx, wanted, fix=fix, force=force)
+        results = check_entries(ctx, wanted, fix=fix)
     finally:
         ctx.close()
 

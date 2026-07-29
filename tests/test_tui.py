@@ -15,7 +15,14 @@ from lit.actions.add import AddResult
 from lit.actions.code import CodeResult
 from lit.config import Config
 from lit.models import CODE_FROM_WEB, STATUS_UNREAD
-from lit.tui import BrowserApp, ConfirmDelete, ConfirmFindCode, ConfirmRead
+from lit.actions.check import CheckResult
+from lit.tui import (
+    BrowserApp,
+    ConfirmCheck,
+    ConfirmDelete,
+    ConfirmFindCode,
+    ConfirmRead,
+)
 
 
 @pytest.fixture
@@ -478,6 +485,81 @@ async def test_open_code_says_so_when_there_is_no_repository(app, monkeypatch):
         app.action_cycle_filter()  # -> not read: the entry with no code link
         await pilot.pause()
         app.action_open_code()  # must not raise, must not open
+
+
+# --------------------------------------------------------------------------
+# Checking metadata
+# --------------------------------------------------------------------------
+
+def _stub_check(monkeypatch, calls, *, result=None, boom=False):
+    """Stand in for the action, so no agent and no network are reached."""
+    def fake(ctx, entries, **kw):
+        calls.append((entries[0].key, kw))
+        if boom:
+            raise RuntimeError("the checker died")
+        return [result or CheckResult(
+            key=entries[0].key, status="fixed",
+            changes=["venue 'Elsevier BV' → 'NeurIPS'"])]
+
+    monkeypatch.setattr("lit.tui.check_entries", fake)
+
+
+async def test_pressing_M_then_confirming_checks_the_metadata(app, stocked,
+                                                              monkeypatch):
+    calls: list = []
+    _stub_check(monkeypatch, calls)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("M")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmCheck)
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.checking == set()
+
+    assert calls[0][0] == "vaswani2017attention"
+
+
+async def test_the_browser_applies_what_it_confirms(app, stocked, monkeypatch):
+    """The CLI reports and needs --fix; the browser asked first, so it writes."""
+    calls: list = []
+    _stub_check(monkeypatch, calls)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.start_check(stocked.get("vaswani2017attention"))
+        assert app.checking == {"vaswani2017attention"}
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    assert calls[0][1]["fix"] is True
+
+
+async def test_checking_asks_before_spending_an_agent(app, monkeypatch):
+    monkeypatch.setattr("lit.tui.check_entries",
+                        lambda *a, **k: pytest.fail("checked without confirming"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_check_entry()
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmCheck)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+def test_the_check_prompt_lists_what_already_looks_wrong(lib):
+    entry = lib.save_entry(make_entry(venue="Elsevier BV"))
+    body = ConfirmCheck(entry).body_text()
+    assert "publisher" in body
+    assert "notes are never touched" in body
+
+
+def test_the_check_prompt_is_still_offered_for_a_clean_entry(lib):
+    """Nothing looking wrong is not a reason to hide the second opinion."""
+    body = ConfirmCheck(lib.save_entry(make_entry())).body_text()
+    assert "Already looks off" not in body
+    assert "venue, year and type" in body
 
 
 # --------------------------------------------------------------------------

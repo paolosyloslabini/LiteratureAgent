@@ -7,18 +7,21 @@ for a decade, a year that predates the paper's own preprint, an author list
 collapsed to one name. None of that fails a schema, so nothing upstream catches
 it, and `lit refresh` re-fetches the same wrong answer.
 
-The work is ordered cheapest-first, and the model is the last resort rather than
-the first:
+Asking for a check is itself the statement that the stored record is not
+trusted, so every entry passed in gets an agent that goes and looks. There is no
+cheap path that skips one: a code-side audit deciding an entry "looks fine"
+would answer the user's doubt with the same code whose output they are doubting.
+What the caller controls is the scope — one key, or `--level` / `--tag` / `-n` —
+not whether the call happens.
 
-1. **Audit in code.** `audit()` is pure — no network, no tokens — and decides
-   which entries are worth looking at and exactly which fields are suspect. An
-   entry nothing is wrong with costs nothing at all.
-2. **Re-resolve from the indexes.** Free, authoritative, and fixes most of what
-   the audit finds: a venue that was a publisher name, a stale citation count, a
-   preprint that has since been published. Whatever this settles is never put to
-   a model.
-3. **Ask a cheap agent about the rest.** Only fields the indexes still disagree
-   about or do not know, one call per entry, with web search.
+Each entry therefore goes through two steps:
+
+1. **Re-resolve from the indexes.** Free and authoritative, and worth doing
+   first: a field the indexes can settle with a better identifier is one the
+   agent should be verifying in its corrected form rather than its stale one.
+2. **Ask a cheap agent.** Always, with web search, about venue, year and type.
+   `audit()` rides along as a hint — "these also look implausible from here" —
+   which sharpens the prompt without gating it.
 
 What the agent proposes is checked before it is believed, on the same principle
 as `lit code`: a model asked for a venue will produce a plausible one. A proposed
@@ -84,7 +87,6 @@ class Suspicion:
 class CheckResult:
     key: str
     title: str = ""
-    # clean     — nothing looked wrong; no network, no tokens spent
     # fixed     — corrections were confirmed and written
     # proposed  — corrections were confirmed but --fix was not given
     # confirmed — looked wrong, checked out as correct after all
@@ -122,11 +124,14 @@ class CheckResult:
 # --------------------------------------------------------------------------
 
 def audit(entry: Entry, *, today_year: int | None = None) -> list[Suspicion]:
-    """Everything that looks wrong about one entry's metadata.
+    """Everything that looks wrong about one entry's metadata, from here.
 
-    Deliberately conservative: every rule here has to be worth an agent call, so
-    it fires on metadata that is *implausible*, not merely unflattering. A paper
-    with genuinely few citations is not suspicious; a decade-old paper with none
+    A hint, not a verdict: it points the agent at fields worth a closer look and
+    it is what `--fix` reports against, but an empty list does not mean an entry
+    goes unchecked. Deliberately conservative all the same, since a false
+    positive sends the agent looking for a problem that is not there — it fires
+    on metadata that is *implausible*, not merely unflattering. A paper with
+    genuinely few citations is not suspicious; a decade-old paper with none
     recorded at all is a gap in what we fetched.
     """
     today_year = today_year or date.today().year
@@ -205,37 +210,31 @@ def arxiv_year(arxiv_id: str | None) -> int | None:
 # The command
 # --------------------------------------------------------------------------
 
-def check_entries(ctx: Ctx, entries: list[Entry], *, fix: bool = False,
-                  force: bool = False) -> list[CheckResult]:
-    """Audit entries, confirm what looks wrong, and optionally correct it.
+def check_entries(ctx: Ctx, entries: list[Entry], *,
+                  fix: bool = False) -> list[CheckResult]:
+    """Have an agent verify each entry's record, and optionally correct it.
 
-    `force` puts every entry through the full check even when the audit found
-    nothing, which is the only way to spend tokens on an entry that looks fine.
+    Every entry passed in gets its agent call. There is deliberately no cheap
+    path that skips one: asking for a check *is* the statement that the stored
+    metadata is not trusted, and letting `audit()` decide an entry looks fine
+    would answer that doubt with the same code whose output is in doubt.
+
+    `audit()` still runs, but as a hint carried into the prompt — "these fields
+    also look implausible from here" — rather than as a gate in front of it. So
+    the caller controls the bill by choosing what to pass in (`--level`,
+    `--tag`, `-n`, or one key), not by having the audit quietly decline.
     """
     if not entries:
         return []
 
-    todo: list[Entry] = []
-    clean: list[CheckResult] = []
-    for e in entries:
-        found = audit(e)
-        if found or force:
-            todo.append(e)
-        else:
-            clean.append(CheckResult(
-                key=e.key, title=e.title, status="clean",
-                message="metadata looks consistent",
-            ))
-    if not todo:
-        return clean
-
+    todo = list(entries)
     ctx.log(
-        f"[bold]Checking[/bold] metadata for {len(todo)} suspicious "
-        f"entr{'y' if len(todo) == 1 else 'ies'}…"
+        f"[bold]Checking[/bold] the record of {len(todo)} "
+        f"entr{'y' if len(todo) == 1 else 'ies'} — one cheap agent call each…"
     )
 
     def work(entry: Entry) -> CheckResult:
-        return _check_one(ctx, entry, fix=fix, force=force)
+        return _check_one(ctx, entry, fix=fix)
 
     def report(r) -> None:
         if not r.ok:
@@ -261,14 +260,14 @@ def check_entries(ctx: Ctx, entries: list[Entry], *, fix: bool = False,
         else:
             out.append(CheckResult(key=entry.key, title=entry.title,
                                    status="error", message=str(r.error)))
-    return out + clean
+    return out
 
 
 # --------------------------------------------------------------------------
 # One entry
 # --------------------------------------------------------------------------
 
-def _check_one(ctx: Ctx, entry: Entry, *, fix: bool, force: bool) -> CheckResult:
+def _check_one(ctx: Ctx, entry: Entry, *, fix: bool) -> CheckResult:
     res = CheckResult(key=entry.key, title=entry.title, suspicions=audit(entry))
 
     # Corrections are staged on a copy, so a run without --fix can report exactly
@@ -276,14 +275,16 @@ def _check_one(ctx: Ctx, entry: Entry, *, fix: bool, force: bool) -> CheckResult
     draft = copy.deepcopy(entry)
     sources: list[str] = []
 
+    # The indexes are asked first because they are free and authoritative, and
+    # because a field they can correct with a better identifier is one the agent
+    # should be verifying in its corrected form rather than its stale one. This
+    # is not a shortcut past the agent — it runs either way, immediately below.
     if _resolve_from_indexes(ctx, draft, res):
         sources.append("metadata indexes")
 
-    remaining = [s for s in audit(draft) if s.field in MODEL_FIXABLE]
-    if remaining or (force and not res.changes):
-        res.asked_model = True
-        if _ask_the_model(ctx, draft, remaining or audit(draft), res):
-            sources.append("web search")
+    res.asked_model = True
+    if _ask_the_model(ctx, draft, audit(draft), res):
+        sources.append("web search")
 
     # Appended, not assigned: `_ask_the_model` has already recorded *why* it
     # refused a correction ("the source given for it does not resolve"), and that
