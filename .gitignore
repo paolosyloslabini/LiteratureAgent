@@ -9,3 +9,5 @@ build/
 htmlcov/
 .index.db
 .DS_Store
+.claude/worktrees/
+.claude/settings.local.json
