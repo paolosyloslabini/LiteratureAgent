@@ -27,6 +27,7 @@ from textual.widgets import (
 
 from . import entryfile
 from .actions.add import reread
+from .actions.code import find_code
 from .actions.context import Ctx
 from .config import Config
 from .library import Library
@@ -100,6 +101,55 @@ class ConfirmRead(ModalScreen[bool]):
                 id="confirm-body",
             )
             yield Static("[dim]y read · esc cancel[/dim]", id="confirm-help")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class ConfirmFindCode(ModalScreen[bool]):
+    """Searching the web for a paper's repository spends one cheap agent.
+
+    Far less than a read, but it is still a real call that goes out to the
+    network, so it is asked for rather than assumed — and the prompt says what
+    happens to an entry that already has a link.
+    """
+
+    BINDINGS = [
+        Binding("y", "confirm", "Search"),
+        Binding("enter", "confirm", "Search", show=False),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("n", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, entry: Entry):
+        super().__init__()
+        self.entry = entry
+
+    def body_text(self) -> str:
+        """What the prompt says. Pure, so it can be tested on its own."""
+        head = (
+            f"{self.entry.title[:200]}\n\n"
+            f"[dim]{self.entry.citation()}[/dim]\n\n"
+            "Sends one cheap agent to search the web for the repository that "
+            "implements this paper, and records it only if the repository names "
+            "the paper. Runs in the background; the browser stays usable."
+        )
+        if self.entry.code_url:
+            head += (
+                f"\n\n[bold yellow]This entry already links "
+                f"{self.entry.code_url} ({self.entry.code_provenance()}). "
+                "A repository found now replaces it.[/bold yellow]"
+            )
+        return head
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Static("Search the web for this paper's code?", id="confirm-title")
+            yield Static(self.body_text(), id="confirm-body")
+            yield Static("[dim]y search · esc cancel[/dim]", id="confirm-help")
 
     def action_confirm(self) -> None:
         self.dismiss(True)
@@ -190,6 +240,7 @@ class BrowserApp(App):
         Binding("d", "delete_entry", "Delete"),
         Binding("o", "open_link", "Open"),
         Binding("c", "open_code", "Code"),
+        Binding("C", "find_code", "Find code"),
         Binding("f", "cycle_filter", "Filter"),
         Binding("s", "cycle_sort", "Sort"),
         Binding("r", "reload", "Reload"),
@@ -221,7 +272,14 @@ class BrowserApp(App):
         self.sort_i = 0
         # Keys of the entries a reader agent is working on right now.
         self.reading: set[str] = set()
+        # Keys a code scout is searching the web for right now.
+        self.finding: set[str] = set()
         self._quit_warned = False
+
+    @property
+    def busy(self) -> set[str]:
+        """Keys with a background agent working on them, of any kind."""
+        return self.reading | self.finding
 
     # ---------------- layout ----------------
 
@@ -298,6 +356,8 @@ class BrowserApp(App):
         """What the status column says: unread and UNVERIFIED are not the same."""
         if entry.key in self.reading:
             return "reading…"
+        if entry.key in self.finding:
+            return "code…"
         if entry.is_verified:
             return "read"
         return "unread" if entry.is_unread else "UNVERIFIED"
@@ -312,6 +372,8 @@ class BrowserApp(App):
             bits.append(f"query: {self.query!r}")
         if self.reading:
             bits.append(f"reading: {', '.join(sorted(self.reading))}")
+        if self.finding:
+            bits.append(f"finding code: {', '.join(sorted(self.finding))}")
         self.query_one("#status", Static).update(" · ".join(bits))
 
     def detail_markdown(self, entry: Entry) -> str:
@@ -336,7 +398,15 @@ class BrowserApp(App):
         if url := paper_url(entry):
             links.append(f"- Paper: [{url}]({url})")
         if entry.code_url:
-            links.append(f"- Code: [{entry.code_url}]({entry.code_url})")
+            # Which kind of link this is comes before anything else about it: a
+            # repository a scout found on the web is a weaker claim than one the
+            # paper printed, and the browser must not flatten the difference.
+            links.append(
+                f"- Code: [{entry.code_url}]({entry.code_url}) "
+                f"— _{entry.code_provenance()}_"
+            )
+            if entry.code_reason:
+                links.append(f"  - _{entry.code_reason}_")
         if links:
             parts += [""] + links
 
@@ -448,8 +518,15 @@ class BrowserApp(App):
 
     def action_open_code(self) -> None:
         entry = self.current()
-        if entry is not None:
-            self.open_in_browser(entry.code_url, "code repository")
+        if entry is None:
+            return
+        if not entry.code_url:
+            self.notify(
+                "no code repository recorded — press C to search the web for it",
+                severity="warning",
+            )
+            return
+        self.open_in_browser(entry.code_url, "code repository")
 
     def open_in_browser(self, url: str | None, what: str = "link") -> None:
         if not url:
@@ -468,9 +545,10 @@ class BrowserApp(App):
         entry = self.current()
         if entry is None:
             return
-        if entry.key in self.reading:
+        if entry.key in self.busy:
             self.notify(
-                f"{entry.key} is being read right now — let it finish first",
+                f"an agent is working on {entry.key} right now — "
+                "let it finish first",
                 severity="warning",
             )
             return
@@ -492,6 +570,67 @@ class BrowserApp(App):
             index = max(0, min(row, len(self.shown) - 1))
             table.move_cursor(row=index)
             self.show_detail(self.shown[index])
+
+    # ---------------- finding code ----------------
+
+    def action_find_code(self) -> None:
+        """Search the web for this paper's code — the browser's `lit code <key>`."""
+        entry = self.current()
+        if entry is None:
+            return
+        if entry.key in self.finding:
+            self.notify(f"already searching for {entry.key}'s code",
+                        severity="warning")
+            return
+        self.push_screen(ConfirmFindCode(entry), partial(self._find_confirmed, entry))
+
+    def _find_confirmed(self, entry: Entry, confirmed: bool | None) -> None:
+        if confirmed:
+            self.start_find_code(entry)
+
+    def start_find_code(self, entry: Entry) -> None:
+        """Run one code search in a background thread, leaving the browser usable."""
+        self.finding.add(entry.key)
+        self.refresh_rows()
+        self.notify(f"searching the web for {entry.key}'s code")
+        self.run_worker(
+            partial(self._find_code_worker, entry.key),
+            thread=True, group="code", name=f"code:{entry.key}",
+        )
+
+    def _find_code_worker(self, key: str) -> None:
+        ctx = Ctx(cfg=self.cfg, library=self.library, console=Console(quiet=True),
+                  yes=True)
+        cost = ""
+        try:
+            entry = self.library.get(key)
+            if entry is None:
+                ok, message = False, f"{key} is no longer in the library"
+            else:
+                # --force: the user was shown the existing link in the prompt and
+                # chose to search anyway.
+                results = find_code(ctx, [entry], force=True)
+                res = results[0]
+                ok = res.ok
+                message = f"{key}: {res.message or res.status}"
+                cost = ctx.usage.summary()
+        except Exception as exc:
+            ok, message = False, f"{key}: {exc}"
+        finally:
+            ctx.close()
+        self.call_from_thread(self._find_code_finished, key, ok, message, cost)
+
+    def _find_code_finished(self, key: str, ok: bool, message: str,
+                            cost: str) -> None:
+        self.finding.discard(key)
+        if not self.busy:
+            self._quit_warned = False
+        self.action_reload()
+        self.notify(
+            message + (f"\n{cost}" if cost else ""),
+            severity="information" if ok else "warning",
+            timeout=12,
+        )
 
     # ---------------- reading ----------------
 
@@ -546,7 +685,7 @@ class BrowserApp(App):
 
     def _read_finished(self, key: str, ok: bool, message: str, cost: str) -> None:
         self.reading.discard(key)
-        if not self.reading:
+        if not self.busy:
             self._quit_warned = False
         self.action_reload()
         self.notify(
@@ -556,12 +695,12 @@ class BrowserApp(App):
         )
 
     async def action_quit(self) -> None:
-        # A thread worker cannot be cancelled, and quitting mid-read would drop
-        # the summary that has already been paid for.
-        if self.reading and not self._quit_warned:
+        # A thread worker cannot be cancelled, and quitting mid-run would drop
+        # work that has already been paid for.
+        if self.busy and not self._quit_warned:
             self._quit_warned = True
             self.notify(
-                f"still reading {', '.join(sorted(self.reading))} — "
+                f"still working on {', '.join(sorted(self.busy))} — "
                 "press q again to quit anyway",
                 severity="warning",
             )

@@ -32,6 +32,13 @@ ENTRY_TYPES = [
 
 STATUS_VERIFIED = "verified"
 STATUS_UNVERIFIED = "UNVERIFIED"
+# Where a `code_url` came from. The paper's own text printing a link is the
+# strong claim; a repository found by searching the web is a weaker one, and the
+# two must never be presented as the same thing. An entry written before this
+# field existed carries None, which could only have come from the paper — that
+# was the only writer at the time.
+CODE_FROM_PAPER = "paper"
+CODE_FROM_WEB = "web"
 # Stored deliberately without a read: the metadata and the publisher's abstract
 # are there, the summaries are not, and nothing was attempted. Distinct from
 # UNVERIFIED, which means a read *was* attempted and no full text could be
@@ -127,8 +134,12 @@ class Entry:
     doi: str | None = None
     arxiv_id: str | None = None
     url: str | None = None
-    # The paper's own code/artifact repository, as printed in its text.
+    # The work's code/artifact repository: printed in its own text, or found on
+    # the web by `lit code`. `code_source` says which, and `code_reason` records
+    # the evidence, so the two are never confused for each other.
     code_url: str | None = None
+    code_source: str | None = None
+    code_reason: str = ""
 
     status: str = STATUS_UNVERIFIED
     level: str = "unranked"
@@ -193,6 +204,19 @@ class Entry:
         if not self.is_partial_read:
             return f"{self.pages} pages (complete)"
         return f"{self.pages_read} of {self.pages} pages (sampled)"
+
+    def code_provenance(self) -> str:
+        """Short label for where `code_url` came from. Empty when there is none.
+
+        The evidence behind it lives in `code_reason`; this is the one-glance
+        version. Nothing displays a code link without it — a repository found by
+        searching the web must never read as one the authors printed.
+        """
+        if not self.code_url:
+            return ""
+        if self.code_source == CODE_FROM_WEB:
+            return "found on the web"
+        return "printed in the paper"
 
     def detailed_summary_md(self) -> str:
         """Section-by-section summary rendered as Markdown."""

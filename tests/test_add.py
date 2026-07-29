@@ -11,11 +11,17 @@ import pytest
 from factories import make_meta
 from rich.console import Console
 
-from lit.actions.add import add_paper
+from lit.actions.add import add_paper, reread
 from lit.actions.context import Ctx, parse_target
 from lit.fetch.fulltext import FullText
 from lit.llm import LLMError
-from lit.models import STATUS_UNREAD, STATUS_UNVERIFIED, STATUS_VERIFIED
+from lit.models import (
+    CODE_FROM_PAPER,
+    CODE_FROM_WEB,
+    STATUS_UNREAD,
+    STATUS_UNVERIFIED,
+    STATUS_VERIFIED,
+)
 
 READING = {
     "one_liner": "Introduces the Transformer.",
@@ -258,6 +264,55 @@ def test_a_paper_with_no_code_has_no_code_url(monkeypatch, ctx):
     wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
          llm=StubLLM(code_reading(None)))
     assert add_paper(ctx, "t").entry.code_url is None
+
+
+def test_a_link_the_paper_prints_is_marked_as_the_papers_own(monkeypatch, ctx):
+    text = "x" * 9000 + "\nCode: https://github.com/google/flax\n"
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"),
+         llm=StubLLM(code_reading("https://github.com/google/flax")))
+    entry = add_paper(ctx, "t").entry
+    assert entry.code_source == CODE_FROM_PAPER
+    assert entry.code_provenance() == "printed in the paper"
+
+
+def test_a_re_read_keeps_a_repository_that_lit_code_found(monkeypatch, ctx):
+    """A read only sees the paper's text, so it must not drop a searched-for link."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(code_reading(None)))
+    add_paper(ctx, "t")
+    found = ctx.library.get("vaswani2017attention")
+    found.code_url = "https://github.com/found/here"
+    found.code_source = CODE_FROM_WEB
+    found.code_reason = "author release, high confidence"
+    ctx.library.save_entry(found)
+
+    entry = reread(ctx, "vaswani2017attention").entry
+
+    assert entry.code_url == "https://github.com/found/here"
+    assert entry.code_source == CODE_FROM_WEB
+    assert entry.code_reason == "author release, high confidence"
+
+
+def test_a_link_found_in_the_text_wins_over_one_that_was_searched_for(
+        monkeypatch, ctx):
+    """The paper's own word is the better evidence, so a re-read upgrades it."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(code_reading(None)))
+    add_paper(ctx, "t")
+    found = ctx.library.get("vaswani2017attention")
+    found.code_url = "https://github.com/found/here"
+    found.code_source = CODE_FROM_WEB
+    found.code_reason = "third-party reimplementation"
+    ctx.library.save_entry(found)
+
+    text = "x" * 9000 + "\nCode: https://github.com/google/flax\n"
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"),
+         llm=StubLLM(code_reading("https://github.com/google/flax")))
+    entry = reread(ctx, "vaswani2017attention").entry
+
+    assert entry.code_url == "https://github.com/google/flax"
+    assert entry.code_source == CODE_FROM_PAPER
+    assert entry.code_reason == ""
 
 
 def test_the_abstract_is_taken_from_metadata_not_the_model(monkeypatch, ctx):

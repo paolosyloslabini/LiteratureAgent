@@ -355,7 +355,7 @@ def test_skill_show(isolated):
 def test_help_lists_every_verb():
     out = runner.invoke(app, ["--help"]).stdout
     for verb in ["new", "add", "find", "search", "ask", "claim", "cite",
-                 "export", "import", "skill", "browse", "note", "inbox"]:
+                 "export", "import", "skill", "browse", "note", "inbox", "code"]:
         assert verb in out
 
 
@@ -371,6 +371,81 @@ def test_refresh_specific_key(stocked, monkeypatch):
     monkeypatch.setattr("lit.actions.refresh.resolve_metadata", lambda *a, **k: None)
     data = js(run("--json", "refresh", "vaswani2017attention"))
     assert [r["key"] for r in data["refreshed"]] == ["vaswani2017attention"]
+
+
+# --------------------------------------------------------------------------
+# `lit code` — the web search for a paper's implementation
+# --------------------------------------------------------------------------
+
+def _found_code(monkeypatch, payload=None):
+    """Answer the code scout from memory, and let every URL resolve."""
+    from lit.actions import code as code_action
+
+    monkeypatch.setattr(
+        code_action, "_check_reachable", lambda ctx, url: (True, ""))
+    _bill(monkeypatch, model="claude-haiku-4-5", reply=payload or {
+        "repo_url": "https://github.com/tensorflow/tensor2tensor",
+        "official": True, "evidence": "the README cites the paper",
+        "confidence": "high",
+    })
+
+
+def test_code_records_what_the_scout_confirmed(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    data = js(run("--json", "code", "vaswani2017attention"))
+
+    assert data["code"][0]["status"] == "found"
+    assert data["code"][0]["code_url"] == "https://github.com/tensorflow/tensor2tensor"
+    saved = stocked.get("vaswani2017attention")
+    assert saved.code_url == "https://github.com/tensorflow/tensor2tensor"
+    assert saved.code_source == "web"
+
+
+def test_code_reports_usage(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    assert "$0.25" in js(run("--json", "code", "vaswani2017attention"))["usage"]
+
+
+def test_code_needs_keys_or_all(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    r = run("--json", "code")
+    assert r.exit_code != 0
+    assert "error" in js(r)
+
+
+def test_code_all_walks_the_entries_without_a_link(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    keys = [c["key"] for c in js(run("--json", "code", "--all"))["code"]]
+    assert set(keys) == {"vaswani2017attention", "doe2010obscure"}
+
+
+def test_code_all_skips_entries_that_already_have_one(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    stocked.save_entry(make_entry(code_url="https://github.com/a/b"))
+    keys = [c["key"] for c in js(run("--json", "code", "--all"))["code"]]
+    assert keys == ["doe2010obscure"]
+
+
+def test_code_reports_an_unknown_key(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    r = run("--json", "code", "nosuchkey")
+    assert r.exit_code != 0
+    assert "nosuchkey" in js(r)["error"]
+
+
+def test_code_dry_run_stores_nothing(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    data = js(run("--json", "code", "vaswani2017attention", "--dry-run"))
+    assert data["code"][0]["status"] == "found"
+    assert stocked.get("vaswani2017attention").code_url is None
+
+
+def test_code_show_reports_where_the_link_came_from(stocked, monkeypatch):
+    _found_code(monkeypatch)
+    run("code", "vaswani2017attention")
+    data = js(run("--json", "show", "vaswani2017attention"))
+    assert data["code_source"] == "web"
+    assert "README" in data["code_reason"]
 
 
 def test_cite_with_no_arguments(stocked):

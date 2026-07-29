@@ -88,7 +88,9 @@ def entry_panel(entry: Entry, *, full: bool = False) -> Panel:
     if entry.url:
         lines.append(entry.url)
     if entry.code_url:
-        lines.append(f"Code: {entry.code_url}")
+        lines.append(f"Code: {entry.code_url} [dim]({entry.code_provenance()})[/dim]")
+        if entry.code_reason:
+            lines.append(f"[dim]{entry.code_reason}[/dim]")
 
     if entry.is_partial_read:
         lines.append(
