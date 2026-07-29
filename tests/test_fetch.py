@@ -508,6 +508,29 @@ def test_resolve_falls_back_to_a_title_search_with_no_identifier(monkeypatch):
     assert meta.doi is None  # the mirror's DOI was not adopted
 
 
+def test_resolve_does_not_adopt_a_similar_but_different_paper(monkeypatch):
+    """A title-only lookup *is* the identity decision, so it is held to the same
+    bar the index search uses. "Channel Attention Is All You Need for Video Frame
+    Interpolation" scores 0.71 against "Attention Is All You Need" — enough to
+    clear a loose threshold and get read and filed under the requested title."""
+    import lit.fetch.metadata as md
+
+    def fake_search(http, query, limit=10, cfg=None, **kw):
+        return [make_meta(
+            title="Channel Attention Is All You Need for Video Frame Interpolation",
+            doi="10.1609/aaai.v34i07.6693", arxiv_id=None, citation_count=900)]
+
+    monkeypatch.setattr(md, "search_works", fake_search)
+    monkeypatch.setattr(md, "from_crossref", lambda http, doi: None)
+    monkeypatch.setattr(md, "from_semantic_scholar", lambda *a, **kw: None)
+    monkeypatch.setattr(md, "s2_by_title", lambda *a, **kw: None)
+    monkeypatch.setattr(md, "crossref_bibtex", lambda http, doi: "")
+
+    # Nothing resolved beats the wrong paper: `add` turns this into a
+    # "could not find a bibliographic record — try a DOI" answer.
+    assert md.resolve_metadata(http=None, title="Attention Is All You Need") is None
+
+
 # --------------------------------------------------------------------------
 # What a reading prompt should not have to carry
 #
