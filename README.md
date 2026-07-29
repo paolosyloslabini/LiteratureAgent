@@ -80,6 +80,7 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit inbox` | adopt PDFs you dropped in `pdfs/inbox/` |
 | `lit refresh` | re-fetch citations, references and venues (no LLM) |
 | `lit ls` / `show` / `note` / `rm` | browse and annotate |
+| `lit abstract` | print an entry's abstract, ready to pipe |
 | `lit search` | find in-library sources (fast, from summaries) |
 | `lit ask` | answer a question by reading the actual papers |
 | `lit claim` | trace a claim back to the paper that originates it |
@@ -127,6 +128,32 @@ or numbers from pages it cannot see. Raise the budget with
 `lit config set fetch.max_read_pages 40`, or set it to `0` for no limit.
 
 Reference lists always come from the metadata APIs, never from the model.
+
+### Abstracts and code links
+
+Every entry keeps the **publisher's abstract** verbatim, straight from
+Crossref/arXiv/Semantic Scholar. It is metadata rather than anything an agent
+wrote, so it is on record even for `UNVERIFIED` entries whose full text was
+never reached, and it is searchable like the rest of the entry:
+
+```bash
+lit abstract vaswani2017attention        # plain text, pipeable
+lit show vaswani2017attention --json | jq -r .abstract
+```
+
+Papers with code get a **`code_url`** — GitHub, GitLab, Hugging Face, Zenodo,
+OSF, Code Ocean and the like — found by the agent while it reads the paper, in
+the places authors actually put them: the abstract, a first-page footnote, or
+the availability statement at the end. `lit show` prints it, and `--json`
+carries it.
+
+The link is only kept if the paper really printed it. A model asked for a
+repository will otherwise supply a confident, well-formed URL from memory — the
+right lab, a project that does not exist — so the returned URL is checked
+against the very text the model was given, compared loosely enough to survive a
+PDF snapping the URL across two lines. A bare `github.com/some-org` with no
+project on it is rejected too. No link recorded means the paper printed none;
+it does not mean there is no code.
 
 A library outlives the day it was built, so `lit refresh` re-fetches citation
 counts, reference lists and venues for entries you already have — and picks up

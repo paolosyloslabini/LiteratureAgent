@@ -75,6 +75,17 @@ def test_search_finds_by_summary_content(stocked):
     assert "brown2020language" in [h.key for h in hits]
 
 
+def test_search_finds_by_abstract(stocked):
+    path = stocked.entry_path("doe2010obscure")
+    entry = stocked.get("doe2010obscure")
+    entry.abstract = "A study of hydrodynamic widget lubrication."
+    stocked.save_entry(entry)
+    assert path.exists()
+    with Store(stocked) as s:
+        hits = s.search("hydrodynamic lubrication")
+    assert "doe2010obscure" in [h.key for h in hits]
+
+
 def test_search_finds_by_user_notes(stocked):
     from lit import entryfile
 

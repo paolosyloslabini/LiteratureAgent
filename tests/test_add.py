@@ -136,6 +136,66 @@ def test_metadata_is_still_recorded_when_unverified(monkeypatch, ctx):
     assert res.entry.arxiv_id == "1706.03762"
 
 
+# --------------------------------------------------------------------------
+# Code / artifact links, and the abstract
+# --------------------------------------------------------------------------
+
+def code_reading(url):
+    return dict(READING, code_url=url)
+
+
+def test_code_url_is_kept_when_the_paper_prints_it(monkeypatch, ctx):
+    text = "x" * 9000 + "\nCode: https://github.com/google/flax\n"
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"),
+         llm=StubLLM(code_reading("https://github.com/google/flax")))
+    res = add_paper(ctx, "t")
+    assert res.entry.code_url == "https://github.com/google/flax"
+
+
+def test_code_url_survives_a_line_break_in_the_extracted_text(monkeypatch, ctx):
+    # PDF extraction routinely snaps a long URL across lines.
+    text = "x" * 9000 + "\nour code is at https://github.com/\ngoogle/flax today"
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"),
+         llm=StubLLM(code_reading("https://github.com/google/flax")))
+    assert add_paper(ctx, "t").entry.code_url == "https://github.com/google/flax"
+
+
+def test_a_code_url_absent_from_the_text_is_dropped(monkeypatch, ctx):
+    # The model recalling a plausible repo is exactly what must not be stored.
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(code_reading("https://github.com/google/attention")))
+    assert add_paper(ctx, "t").entry.code_url is None
+
+
+def test_a_non_repository_url_is_dropped(monkeypatch, ctx):
+    text = "x" * 9000 + "\nSee https://sites.google.com/view/our-project\n"
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText(text, "arxiv"),
+         llm=StubLLM(code_reading("https://sites.google.com/view/our-project")))
+    assert add_paper(ctx, "t").entry.code_url is None
+
+
+def test_a_paper_with_no_code_has_no_code_url(monkeypatch, ctx):
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(code_reading(None)))
+    assert add_paper(ctx, "t").entry.code_url is None
+
+
+def test_the_abstract_is_taken_from_metadata_not_the_model(monkeypatch, ctx):
+    wire(monkeypatch, ctx, meta=make_meta(abstract="The publisher's abstract."),
+         fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(dict(READING, abstract="A model-written abstract.")))
+    assert add_paper(ctx, "t").entry.abstract == "The publisher's abstract."
+
+
+def test_an_unverified_entry_still_carries_its_abstract(monkeypatch, ctx):
+    # Nothing was read, but the abstract is metadata, so it is still on record.
+    wire(monkeypatch, ctx, meta=make_meta(abstract="The publisher's abstract."),
+         fulltext=None)
+    res = add_paper(ctx, "t")
+    assert res.entry.status == STATUS_UNVERIFIED
+    assert res.entry.abstract == "The publisher's abstract."
+
+
 def test_no_record_found_is_reported(monkeypatch, ctx):
     wire(monkeypatch, ctx, meta=None, fulltext=None)
     res = add_paper(ctx, "A Paper That Does Not Exist")

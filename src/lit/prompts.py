@@ -70,6 +70,10 @@ def read_paper_prompt(
         "type": f"string — one of: {', '.join(ENTRY_TYPES)}",
         "venue_from_text": "string|null — the venue stated in the paper itself, "
                            "if any (look at the header/footer/first page)",
+        "code_url": "string|null — the code or artifact repository this document "
+                    "links to (GitHub, GitLab, Hugging Face, Zenodo, OSF, Code "
+                    "Ocean and the like), copied character-for-character from "
+                    "the text. null if it does not give one.",
     }
     if needs_level:
         schema["level"] = "string — one of A*, A, B, C"
@@ -90,6 +94,12 @@ def read_paper_prompt(
         "result. Include concrete numbers where the paper reports them.",
         "- Do not include the reference list as a section.",
         "- Write nothing you cannot point to in the text.",
+        "- For code_url, look wherever authors put release links: the abstract, "
+        "a footnote on the first page, the end of the introduction, and any "
+        "availability or reproducibility statement near the end. Copy the URL "
+        "exactly as printed. Never reconstruct one from the authors', project's "
+        "or method's name, and never supply one you happen to know — if the "
+        "document does not print a link, the answer is null.",
     ]
     if scope:
         parts += [

@@ -115,6 +115,43 @@ def test_show(stocked):
     assert data["references"][0]["arxiv_id"] == "1409.0473"
 
 
+def test_show_reports_the_abstract_and_code_url(stocked):
+    stocked.save_entry(make_entry(
+        abstract="The publisher's abstract.",
+        code_url="https://github.com/google/flax"))
+    data = js(run("--json", "show", "vaswani2017attention"))
+    assert data["abstract"] == "The publisher's abstract."
+    assert data["code_url"] == "https://github.com/google/flax"
+
+
+def test_abstract_command_prints_the_abstract(stocked):
+    stocked.save_entry(make_entry(abstract="The publisher's abstract."))
+    r = run("abstract", "vaswani2017attention")
+    assert r.exit_code == 0
+    assert r.stdout.strip() == "The publisher's abstract."
+
+
+def test_abstract_command_labels_multiple_entries(stocked):
+    stocked.save_entry(make_entry(abstract="First abstract."))
+    out = run("abstract", "vaswani2017attention", "doe2010obscure").stdout
+    assert "First abstract." in out
+    assert "vaswani2017attention" in out and "doe2010obscure" in out
+
+
+def test_abstract_command_says_so_when_there_is_none(stocked):
+    assert "lit refresh" in run("abstract", "doe2010obscure").stdout
+
+
+def test_abstract_command_json(stocked):
+    stocked.save_entry(make_entry(abstract="The publisher's abstract."))
+    data = js(run("--json", "abstract", "vaswani2017attention"))
+    assert data[0]["abstract"] == "The publisher's abstract."
+
+
+def test_abstract_command_missing_key_fails(stocked):
+    assert run("abstract", "nope").exit_code != 0
+
+
 def test_show_missing_key_fails(stocked):
     assert run("--json", "show", "nope").exit_code != 0
 

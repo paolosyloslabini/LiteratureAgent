@@ -7,6 +7,7 @@ Layout of an entry file:
     ---
 
     ## One-line summary
+    ## Abstract
     ## Key findings
     ## Detailed summary
     ### <section> ...
@@ -43,7 +44,7 @@ NOTES_BANNER = (
 # Frontmatter key order; anything not listed is appended alphabetically.
 _FM_ORDER = [
     "key", "title", "authors", "year", "venue", "type",
-    "doi", "arxiv_id", "url",
+    "doi", "arxiv_id", "url", "code_url",
     "status", "level", "level_reason",
     "tags", "citation_count",
     "read_source", "pdf_path", "text_chars", "pages", "pages_read",
@@ -52,7 +53,7 @@ _FM_ORDER = [
 ]
 
 # Fields that live in the Markdown body rather than the frontmatter.
-_BODY_FIELDS = {"one_liner", "key_findings", "sections", "notes"}
+_BODY_FIELDS = {"abstract", "one_liner", "key_findings", "sections", "notes"}
 
 
 class _BlockDumper(yaml.SafeDumper):
@@ -94,6 +95,9 @@ def dumps(entry: Entry) -> str:
     if entry.one_liner:
         parts.append(f"\n## One-line summary\n\n{entry.one_liner.strip()}\n")
 
+    if entry.abstract.strip():
+        parts.append(f"\n## Abstract\n\n{entry.abstract.strip()}\n")
+
     if entry.key_findings:
         findings = "\n".join(f"- {f.strip()}" for f in entry.key_findings if f.strip())
         parts.append(f"\n## Key findings\n\n{findings}\n")
@@ -128,8 +132,9 @@ def loads(text: str) -> Entry:
         key=str(data.get("key") or ""),
         title=str(data.get("title") or ""),
     )
-    for f in ("venue", "doi", "arxiv_id", "url", "level_reason", "read_source",
-              "pdf_path", "bibtex", "added", "updated", "status", "level", "type"):
+    for f in ("venue", "doi", "arxiv_id", "url", "code_url", "level_reason",
+              "read_source", "pdf_path", "bibtex", "added", "updated", "status",
+              "level", "type"):
         if data.get(f) is not None:
             setattr(entry, f, data[f])
 
@@ -144,6 +149,7 @@ def loads(text: str) -> Entry:
         r for r in (Reference.coerce(x) for x in (data.get("references") or [])) if r
     ]
 
+    entry.abstract = _section_text(machine_body, "Abstract")
     entry.one_liner = _section_text(machine_body, "One-line summary") or None
     entry.key_findings = _bullets(_section_text(machine_body, "Key findings"))
     entry.sections = _parse_sections(_section_text(machine_body, "Detailed summary"))

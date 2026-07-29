@@ -50,8 +50,21 @@ below takes `--json`** — always pass it when you are going to parse the output
 ```bash
 lit ls --level A --tag benchmarks --json      # filter by level, tag, year, status
 lit show <key> --json                          # one entry, with sections + references
+lit abstract <key> [<key> ...]                 # just the abstract(s), to stdout
 lit search "causal discovery in agents" --json # ranked entries + a short answer
 ```
+
+Two fields worth knowing about on every entry:
+
+- `abstract` — the **publisher's** abstract, verbatim from Crossref/arXiv/S2.
+  It is metadata, so it is present even on UNVERIFIED entries. It is not a
+  summary anybody wrote and never evidence that the paper was read; quote it as
+  the authors' own framing, nothing more. `lit refresh` backfills it if blank.
+- `code_url` — the code or artifact repository (GitHub, Hugging Face, Zenodo,
+  …), recorded only when the paper's own text printed it. Offer it when the user
+  asks whether a paper has code or wants to reproduce it. A null here means the
+  paper gave no link — it does not mean no code exists, so say it that way, and
+  never substitute a repository you happen to know of.
 
 `lit search` works from stored summaries — it is fast and cheap. Use it to find
 out **which** papers are relevant.

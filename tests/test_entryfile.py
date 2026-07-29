@@ -26,6 +26,34 @@ def test_round_trip_preserves_fields(entry):
     assert parsed.bibtex == entry.bibtex
 
 
+def test_round_trip_preserves_the_code_url(entry):
+    entry.code_url = "https://github.com/google/flax"
+    parsed = entryfile.loads(entryfile.dumps(entry))
+    assert parsed.code_url == "https://github.com/google/flax"
+
+
+def test_round_trip_preserves_a_multi_paragraph_abstract(entry):
+    entry.abstract = "First paragraph.\n\nSecond paragraph, with a ## in it."
+    text = entryfile.dumps(entry)
+    assert "## Abstract" in text
+    parsed = entryfile.loads(text)
+    assert parsed.abstract == entry.abstract
+
+
+def test_an_absent_abstract_writes_no_heading(entry):
+    entry.abstract = ""
+    assert "## Abstract" not in entryfile.dumps(entry)
+    assert entryfile.loads(entryfile.dumps(entry)).abstract == ""
+
+
+def test_the_abstract_does_not_leak_into_the_detailed_summary(entry):
+    entry.abstract = "ABSTRACTTOKEN"
+    parsed = entryfile.loads(entryfile.dumps(entry))
+    assert "ABSTRACTTOKEN" not in parsed.detailed_summary_md()
+    assert "ABSTRACTTOKEN" not in (parsed.one_liner or "")
+    assert parsed.key_findings == entry.key_findings
+
+
 def test_round_trip_preserves_sections(entry):
     parsed = entryfile.loads(entryfile.dumps(entry))
     assert [s.name for s in parsed.sections] == ["Introduction", "Model Architecture"]

@@ -79,6 +79,11 @@ def refresh_entries(ctx: Ctx, keys: list[str] | None = None,
             entry.bibtex = meta.bibtex
         if meta.url and not entry.url:
             entry.url = meta.url
+        # Backfills entries stored before the abstract was kept, and fills in
+        # one that simply wasn't published yet when the entry was added.
+        if meta.abstract and not entry.abstract.strip():
+            res.changes.append("abstract added")
+            entry.abstract = meta.abstract
 
         # Re-run the level scorer now that the metrics may have arrived. A level
         # the model judged from the paper's content is only overwritten once

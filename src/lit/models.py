@@ -12,6 +12,7 @@ import unicodedata
 from dataclasses import dataclass, field, asdict
 from datetime import date
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 # Levels are ordered best-first. "unranked" means we had no basis to judge.
 LEVELS = ["A*", "A", "B", "C", "unranked"]
@@ -121,11 +122,17 @@ class Entry:
     doi: str | None = None
     arxiv_id: str | None = None
     url: str | None = None
+    # The paper's own code/artifact repository, as printed in its text.
+    code_url: str | None = None
 
     status: str = STATUS_UNVERIFIED
     level: str = "unranked"
     level_reason: str = ""
 
+    # The publisher's abstract, verbatim. Bibliographic metadata, not a summary:
+    # it is copied from Crossref/arXiv/S2 and is never written by a model, so it
+    # is present even on UNVERIFIED entries whose full text was never retrieved.
+    abstract: str = ""
     one_liner: str | None = None
     sections: list[Section] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
@@ -180,6 +187,7 @@ class Entry:
             self.title,
             " ".join(self.authors),
             self.venue or "",
+            self.abstract,
             self.one_liner or "",
             " ".join(self.tags),
             " ".join(self.key_findings),
@@ -237,6 +245,61 @@ def normalize_arxiv(raw: str | None) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+# Hosts that serve code or research artifacts rather than prose. A paper's
+# "our code is available at ..." line almost always points at one of these, and
+# restricting to them keeps project landing pages, DOI links and stray URLs
+# from the reference list out of the field.
+CODE_HOSTS = {
+    "github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "gitee.com",
+    "sourceforge.net", "git.sr.ht", "savannah.gnu.org",
+    "huggingface.co", "zenodo.org", "figshare.com", "osf.io",
+    "codeocean.com", "softwareheritage.org", "dataverse.harvard.edu",
+}
+
+# Forges where a repository needs both an owner and a project to exist:
+# "github.com/deepmind" is an organization page, not a repo.
+_OWNER_REPO_HOSTS = {
+    "github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "gitee.com",
+}
+
+
+def normalize_code_url(raw: str | None) -> str | None:
+    """Clean a code/artifact repository URL. None if it is not one.
+
+    Papers print these inside prose ("code at https://github.com/foo/bar."), so
+    trailing punctuation has to come off, and a bare host or an owner page is
+    not a repository.
+    """
+    if not raw:
+        return None
+    # One pass over the whole set, so a URL wrapped *and* punctuated — the
+    # "(see https://github.com/foo/bar)." of a footnote — comes out clean.
+    s = str(raw).strip().strip("<>()[]{}.,;:'\"")
+    if not s or " " in s:
+        return None
+    if not s.lower().startswith(("http://", "https://")):
+        s = "https://" + s.lstrip("/")
+
+    try:
+        parts = urlsplit(s)
+    except ValueError:
+        return None
+
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in CODE_HOSTS and not any(host.endswith(f".{h}") for h in CODE_HOSTS):
+        return None
+
+    segments = [p for p in parts.path.split("/") if p]
+    if len(segments) < (2 if host in _OWNER_REPO_HOSTS else 1):
+        return None
+
+    # Always https, no fragment: the fragment is a scroll position, not part of
+    # the repository's identity.
+    return urlunsplit(("https", host, "/" + "/".join(segments), parts.query, ""))
 
 
 def slugify(text: str, max_len: int = 40) -> str:

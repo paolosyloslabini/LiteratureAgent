@@ -55,6 +55,22 @@ def test_a_published_version_fills_in_doi_and_venue(monkeypatch, ctx):
     assert e.venue == "NeurIPS"
 
 
+def test_a_missing_abstract_is_backfilled(monkeypatch, ctx):
+    ctx.library.save_entry(make_entry(abstract=""))
+    wire(monkeypatch, make_meta(abstract="The publisher's abstract."))
+    refresh_entries(ctx)
+    assert ctx.library.get("vaswani2017attention").abstract == \
+        "The publisher's abstract."
+
+
+def test_an_existing_abstract_is_left_alone(monkeypatch, ctx):
+    ctx.library.save_entry(make_entry(abstract="The one already on record."))
+    wire(monkeypatch, make_meta(abstract="A different rendering."))
+    refresh_entries(ctx)
+    assert ctx.library.get("vaswani2017attention").abstract == \
+        "The one already on record."
+
+
 def test_level_is_recomputed_once_metrics_arrive(monkeypatch, ctx):
     ctx.library.save_entry(make_entry(
         level="unranked", level_reason="too recent", citation_count=None))

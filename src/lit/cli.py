@@ -677,6 +677,33 @@ def cmd_show(
     console.print(entry_panel(entry, full=full))
 
 
+@app.command("abstract")
+def cmd_abstract(
+    keys: list[str] = typer.Argument(..., help="Entry keys."),
+):
+    """Print the publisher's abstract for one or more entries."""
+    lib = _lib()
+    entries = []
+    for k in keys:
+        e = lib.get(k)
+        if e is None:
+            _fail(f"no entry with key {k!r}")
+        entries.append(e)
+
+    if state.json_mode:
+        _emit([{"key": e.key, "title": e.title, "abstract": e.abstract}
+               for e in entries])
+        return
+
+    blocks = []
+    for e in entries:
+        body = e.abstract.strip() or f"(none on record — try `lit refresh {e.key}`)"
+        # Only label the blocks when there is more than one to tell apart.
+        blocks.append(f"{e.key} — {e.title}\n\n{body}" if len(entries) > 1 else body)
+    # Plain print, not rich: this output is meant to be piped.
+    print("\n\n".join(blocks))
+
+
 @app.command("note")
 def cmd_note(
     key: str = typer.Argument(..., help="Entry key."),
@@ -1092,7 +1119,7 @@ def _entry_json(e: Entry, full: bool = False) -> dict:
     data = {
         "key": e.key, "title": e.title, "authors": e.authors, "year": e.year,
         "venue": e.venue, "type": e.type, "doi": e.doi, "arxiv_id": e.arxiv_id,
-        "url": e.url, "status": e.status, "level": e.level,
+        "url": e.url, "code_url": e.code_url, "status": e.status, "level": e.level,
         "level_reason": e.level_reason, "one_liner": e.one_liner, "tags": e.tags,
         "citation_count": e.citation_count, "citation": e.citation(),
         "key_findings": e.key_findings, "notes": e.notes,
@@ -1101,6 +1128,8 @@ def _entry_json(e: Entry, full: bool = False) -> dict:
         "partial_read": e.is_partial_read, "coverage": e.coverage(),
     }
     if full:
+        # Long prose, like the sections below it: kept out of list output.
+        data["abstract"] = e.abstract
         data["sections"] = [{"name": s.name, "summary": s.summary} for s in e.sections]
         data["references"] = [
             {"title": r.title, "year": r.year, "doi": r.doi,
