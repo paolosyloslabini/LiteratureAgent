@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 
 import pytest
+import typer
 from factories import make_entry
 from typer.testing import CliRunner
 
 from lit.actions.discover import Candidate, FindResult, SearchPlan
-from lit.cli import app, state
+from lit.cli import _prompt_selection, app, state
 from lit.library import Library
 
 runner = CliRunner()
@@ -601,6 +602,78 @@ def test_find_tags_what_it_files_with_the_plan_tags(stocked, monkeypatch):
     assert r.exit_code == 0
     assert seen["extra_tags"] == ["mine", "benchmarks", "agents"]
     assert js(r)["plan"]["tags"] == ["benchmarks", "agents"]
+
+
+# --------------------------------------------------------------------------
+# The selection prompt: one typo must not throw away a search already paid for
+# --------------------------------------------------------------------------
+
+def _answers(monkeypatch, *replies):
+    """Feed the prompt a queue of typed answers, return the defaults it offered.
+
+    An exhausted queue raises `Abort`, which is what a piped stdin with nothing
+    left on it does.
+    """
+    offered, queue = [], list(replies)
+
+    def fake_prompt(text, default=None, **kw):
+        offered.append(default)
+        if not queue:
+            raise typer.Abort()
+        return queue.pop(0)
+
+    monkeypatch.setattr("typer.prompt", fake_prompt)
+    return offered
+
+
+def test_selection_asks_again_when_it_cannot_read_the_answer(monkeypatch):
+    """`1 3` collapses to `13` — worth a second question, not a lost search."""
+    cands = [Candidate(title=f"Paper {i}") for i in range(1, 5)]
+    offered = _answers(monkeypatch, "1 3", "1,3")
+    picked = _prompt_selection(cands)
+    assert len(offered) == 2
+    assert [c.title for c in picked] == ["Paper 1", "Paper 3"]
+
+
+def test_selection_asks_again_exactly_once(monkeypatch):
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "1;3", "still nonsense")
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 2
+
+
+def test_selection_gives_up_when_there_is_no_one_to_ask(monkeypatch):
+    """Piped in: the retry finds nothing on stdin and must not blow up."""
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "1;3")
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 2
+
+
+def test_selection_keeps_what_it_could_read(monkeypatch):
+    cands = [Candidate(title=f"Paper {i}") for i in range(1, 4)]
+    offered = _answers(monkeypatch, "1,zz,3")
+    picked = _prompt_selection(cands)
+    assert [c.title for c in picked] == ["Paper 1", "Paper 3"]
+    assert len(offered) == 1        # something was readable: no second question
+
+
+def test_selection_none_still_means_none(monkeypatch):
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "none")
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 1
+
+
+def test_selection_empty_answers_keep_their_meaning(monkeypatch):
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "all")   # a bare Enter takes the default
+    assert _prompt_selection(cands) == cands
+    assert offered == ["all"]
+
+    offered = _answers(monkeypatch, "   ")   # a blank line still means none
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 1
 
 
 def test_read_needs_a_target(stocked):

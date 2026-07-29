@@ -572,7 +572,7 @@ def _print_candidates(candidates, found) -> None:
     console.print(t)
 
 
-def _prompt_selection(candidates):
+def _prompt_selection(candidates, retry: bool = True):
     console.print(
         "\nAdd which? [cyan]all[/cyan] / [cyan]none[/cyan] / numbers like "
         "[cyan]1,3,5-7[/cyan]"
@@ -602,6 +602,17 @@ def _prompt_selection(candidates):
         if id(c) not in seen:
             seen.add(id(c))
             out.append(c)
+    # A typo ("1 3" collapses to "13", "1;3" reads as nothing) would otherwise
+    # throw away a search that has already been paid for. Ask once more.
+    if not out and retry:
+        console.print(
+            f"[yellow]Could not read selection {raw!r}[/yellow] — nothing "
+            f"selected yet."
+        )
+        try:
+            return _prompt_selection(candidates, retry=False)
+        except typer.Abort:      # piped in: no second answer to read
+            return []
     return out
 
 
