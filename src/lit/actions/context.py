@@ -13,6 +13,11 @@ from ..library import Library
 from ..llm import ClaudeCLI, Usage
 from ..models import normalize_arxiv, normalize_doi
 
+# How much paper text one reading prompt may carry when the config does not say.
+# The live value is `llm.read_chars`; this is only the floor under a config that
+# predates the setting.
+DEFAULT_READ_CHARS = 400_000
+
 
 @dataclass
 class Ctx:
@@ -48,6 +53,17 @@ class Ctx:
     @property
     def workers(self) -> int:
         return max(1, self.cfg.llm.max_parallel)
+
+    @property
+    def read_budget(self) -> int:
+        """Chars of paper text one prompt may carry, from `llm.read_chars`.
+
+        Every command that puts a full text in front of a model reads it from
+        here. It lives on the context rather than in each action because the
+        alternative — a module constant per action — is how `ask` and `claim`
+        came to ignore the configured budget entirely.
+        """
+        return getattr(self.cfg.llm, "read_chars", DEFAULT_READ_CHARS)
 
     def log(self, message: str) -> None:
         """Progress output. Suppressed in --json mode so stdout stays parseable."""

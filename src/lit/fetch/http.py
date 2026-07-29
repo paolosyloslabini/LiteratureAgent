@@ -24,9 +24,16 @@ USER_AGENT_BASE = "literature-agent/0.1 (https://github.com/paolosyloslabini/Lit
 # given a lighter floor because the HTML fallback path hits it once per paper
 # and serialising that at 3s would cost a `find` run far more than it saves.
 # Matching is on the exact hostname, so ar5iv and other subdomains are free.
+#
+# Semantic Scholar's unauthenticated pool is shared across every caller in the
+# world and rejects bursts outright: two requests three seconds apart already
+# earn a 429. It is the only index that counts citations to arXiv-only work
+# properly, so losing its answers costs a `find` the whole notion of which
+# preprint matters — worth serialising for.
 HOST_MIN_INTERVAL: dict[str, float] = {
     "export.arxiv.org": 3.0,
     "arxiv.org": 1.0,
+    "api.semanticscholar.org": 1.2,
 }
 DEFAULT_MIN_INTERVAL = 0.0
 
@@ -38,7 +45,7 @@ class HttpClient:
         self.cfg = cfg or FetchConfig()
         ua = USER_AGENT_BASE
         if self.cfg.email:
-            # Crossref/OpenAlex give a faster "polite pool" when you identify.
+            # Crossref gives a faster "polite pool" when you identify.
             ua += f" mailto:{self.cfg.email}"
         self._client = httpx.Client(
             timeout=self.cfg.timeout_s,
@@ -155,6 +162,50 @@ class HttpClient:
             return r.json()
         except ValueError:
             return None
+
+    def post_json(self, url: str, *, json: Any, params: dict | None = None,
+                  headers: dict | None = None, retries: int = 3) -> Any | None:
+        """POST a JSON body and read a JSON answer back.
+
+        Only used for bulk lookups — Semantic Scholar's batch endpoint answers
+        for up to 500 papers in one request, which is the difference between one
+        call and one per candidate. Failure bookkeeping matches `get`: `None`
+        means no answer, and an unreachable host is counted.
+        """
+        delay = 1.0
+        for attempt in range(retries):
+            self._throttle(url)
+            try:
+                r = self._client.post(url, json=json, params=params, headers=headers)
+            except httpx.HTTPError:
+                if attempt == retries - 1:
+                    self._note_unavailable()
+                    return None
+                time.sleep(delay)
+                delay *= 2
+                continue
+
+            if r.status_code in (429, 500, 502, 503, 504):
+                if attempt == retries - 1:
+                    self._note_unavailable()
+                    return None
+                wait = delay
+                if r.status_code == 429:
+                    try:
+                        wait = max(wait, float(r.headers.get("retry-after", 0)))
+                    except ValueError:
+                        pass
+                time.sleep(min(wait, 30))
+                delay *= 2
+                continue
+
+            if r.status_code >= 400:
+                return None
+            try:
+                return r.json()
+            except ValueError:
+                return None
+        return None
 
     def download(self, url: str, dest, *, max_mb: int | None = None,
                  headers: dict | None = None) -> bool:

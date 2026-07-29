@@ -79,7 +79,9 @@ lit ask "..." --read 8 --expand 3 --json
 `lit ask` opens the actual PDFs and reads them in parallel, then answers with
 **exact quotes** and a bibliography. Use it, not `lit search`, when the user
 wants a real answer rather than a reading list. `--expand N` also pulls in up to
-N works cited by those papers that aren't in the library yet.
+N works cited by those papers that aren't in the library yet. Those arrive with
+`status: unread` — they are quoted from in this answer, but nobody has written
+their stored summary, so `lit read <key>` is what fills it in.
 
 It costs real time and tokens (one agent per paper), so pick `--read` sensibly:
 3-5 for a focused question, 8+ for a survey.
@@ -97,7 +99,7 @@ lit read --all --level A -n 5 --json         # or work through the backlog
 ```
 
 - `add` fetches one paper, reads the **whole text**, and writes the summaries.
-- `find` searches Crossref, OpenAlex and arXiv several ways, mines the reference
+- `find` searches Crossref, Semantic Scholar and arXiv several ways, mines the reference
   lists of papers already in the library, de-duplicates everything, and ranks it
   with one cheap call. It **files papers without reading them**: they get their
   metadata, abstract and level, and `status: unread`. This is cheap — prefer it,

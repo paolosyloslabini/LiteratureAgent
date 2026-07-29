@@ -434,8 +434,8 @@ def cmd_find(
     document type. `--no-plan` searches the string verbatim instead.
 
     Beyond that the default path spends nothing on searching: Crossref,
-    OpenAlex and arXiv are queried several ways, the references of your own
-    entries are mined, and one cheap call ranks the pool against your query.
+    Semantic Scholar and arXiv are queried several ways, the references of your
+    own entries are mined, and one cheap call ranks the pool against your query.
     Papers are filed from their metadata; `--read` (or `lit read` afterwards)
     buys the full section-by-section summaries.
     """
@@ -532,7 +532,8 @@ def _print_candidates(candidates, found) -> None:
     t.add_column("src", no_wrap=True)
     t.add_column("why", ratio=2)
     for i, c in enumerate(candidates, 1):
-        src = {"references": "refs", "scout": "web", "both": "both"}.get(c.source, "?")
+        src = {"references": "refs", "scout": "web", "search": "index",
+               "both": "both"}.get(c.source, "?")
         if c.cocitations:
             src += f" ×{c.cocitations}"
         elif len(c.angles) > 1:
@@ -994,7 +995,8 @@ def cmd_ask(
     expand: int = typer.Option(
         0, "-e", "--expand",
         help="Also pull in up to N works cited by those papers but not yet in "
-             "the library, and read them too."),
+             "the library. They are quoted from like any other source, and "
+             "filed unread — `lit read <key>` summarizes one later."),
     level: Optional[str] = typer.Option(None, "--level"),
     tag: Optional[str] = typer.Option(None, "--tag", "-t"),
     save: Optional[Path] = typer.Option(None, "--save",
