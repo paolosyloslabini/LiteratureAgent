@@ -75,7 +75,7 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit read` / `reread` | read filed papers and write their summaries |
 | `lit inbox` | adopt PDFs dropped in `pdfs/inbox/` |
 | `lit refresh` | re-fetch citations, references and venues (no LLM) |
-| `lit check` | verify suspicious metadata against authoritative sources |
+| `lit check <key>` | send an agent to verify one entry's metadata against its source |
 | `lit ls` / `show` / `note` | browse and annotate |
 | `lit delete` (`rm`) | remove entries, their PDFs and cached text |
 | `lit abstract` | print an entry's abstract |
@@ -224,19 +224,38 @@ summaries and notes untouched.
 
 Indexes also return metadata that is well-formed but wrong — a publisher name
 where a venue belongs, a citation count of zero for a decade-old paper, a year
-that disagrees with the arXiv id. `lit check` audits entries for these patterns
-in code first, then spends one cheap agent per flagged entry to verify the
-suspect fields against authoritative sources:
+that disagrees with the arXiv id. `lit check` sends a cheap agent to verify a
+record's venue, year and type against the published source:
 
 ```bash
-lit check                     # audit the library, report only
-lit check --fix               # apply the corrections it can confirm
-lit --json check <key>
+lit check vaswani2017attention          # report what it finds
+lit check vaswani2017attention --fix    # apply what it can confirm
+lit --json check <key>                  # for scripts and agents
 ```
 
-Nothing is written without `--fix`, corrections are applied only to
-machine-owned bibliographic fields, and each one records the source that
-confirmed it. Summaries and notes are never touched.
+It works an entry at a time and a key is required — checking is a judgement
+about one record, not a sweep, so there is no way to point it at a whole library.
+`lit browse` is built for working down a list this way, one entry per keypress
+with `M`.
+
+Within an entry the agent is always spent. Asking for a check is the statement
+that the stored record is not trusted, so nothing decides in code that an entry
+looks fine and skips the call. The metadata indexes are re-asked first because
+that is free and authoritative, and a local consistency check rides along as a
+hint to the agent; neither replaces it.
+
+What comes back is vetted before it is believed. A proposed venue must not
+itself be a publisher or a preprint server, must carry a quoted line of
+evidence, and must carry a source page that resolves. A proposed DOI is
+confirmed against Crossref by title first, since adopting another work's
+identity would rewrite every other field with it. **Citation counts and author
+lists are never taken from the agent** — a fabricated number cannot be told from
+a real one, so those come from the indexes or not at all.
+
+Nothing is written without `--fix`, only bibliographic fields are ever touched,
+and what was corrected and what confirmed it is recorded in `check_note`. In
+`lit browse`, `M` checks the entry under the cursor and applies what it
+confirms, since there the correction lands in front of you.
 
 ### Notes
 
@@ -257,12 +276,13 @@ adds no capability over the subcommands.
 | `R` | read this paper, after a confirmation |
 | `o` / `c` | open the paper / its code repository in a browser |
 | `C` | find this paper's code, after a confirmation |
+| `M` | check this entry's metadata and apply what it confirms |
 | `n` | edit your notes |
 | `d` | delete this entry, after a confirmation |
 | `/` `f` `s` `r` | search · filter · sort · reload |
 
-`R` and `C` run in the background; the browser stays usable and the row shows
-`reading…` or `code…`. Links open in your real browser — under WSL, the Windows
+`R`, `C` and `M` run in the background; the browser stays usable and the row
+shows `reading…`, `code…` or `checking…`. Links open in your real browser — under WSL, the Windows
 side. `LIT_BROWSER` overrides the choice.
 
 ## Library layout

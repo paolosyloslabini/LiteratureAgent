@@ -728,7 +728,8 @@ _LEVEL_ARGV = [
     ("code", "--all", "--level", "a"),
     ("search", "attention", "--level", "a"),
     ("ask", "what is attention?", "--level", "a"),
-    ("check", "--level", "a"),
+    # `check` is absent on purpose: it takes keys and has no --level to reject,
+    # because checking is a per-entry judgement rather than a sweep.
 ]
 
 
@@ -743,6 +744,45 @@ def test_an_unknown_level_is_rejected_before_anything_expensive(
     r = run("--json", *argv)
     assert r.exit_code != 0
     assert "--level must be one of" in js(r)["error"]
+    assert spent == []
+
+
+def test_check_requires_a_key_rather_than_sweeping_the_library(stocked,
+                                                              monkeypatch):
+    """A bare `lit check` must not turn into an agent call per entry."""
+    spent = []
+    monkeypatch.setattr("lit.cli.check_entries",
+                        lambda *a, **k: (spent.append(1), [])[1])
+    r = run("--json", "check")
+
+    assert r.exit_code != 0
+    assert spent == []
+
+
+def test_check_names_the_entry_it_was_given(stocked, monkeypatch):
+    asked = {}
+
+    def fake(ctx, entries, **kw):
+        asked["keys"] = [e.key for e in entries]
+        asked["fix"] = kw.get("fix")
+        return []
+
+    monkeypatch.setattr("lit.cli.check_entries", fake)
+    r = run("--json", "check", "vaswani2017attention")
+
+    assert r.exit_code == 0
+    assert asked["keys"] == ["vaswani2017attention"]
+    assert asked["fix"] is False
+
+
+def test_check_reports_an_unknown_key_without_spending(stocked, monkeypatch):
+    spent = []
+    monkeypatch.setattr("lit.cli.check_entries",
+                        lambda *a, **k: (spent.append(1), [])[1])
+    r = run("--json", "check", "nosuchkey")
+
+    assert r.exit_code != 0
+    assert "nosuchkey" in js(r)["error"]
     assert spent == []
 
 

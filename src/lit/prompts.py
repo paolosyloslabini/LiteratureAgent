@@ -775,15 +775,16 @@ def check_metadata_prompt(*, entry: Entry,
     }
 
     return "\n".join(filter(None, [
-        "A record in a bibliography looks wrong. Check it against the "
-        "published source.",
+        "Check this bibliography record against the published source.",
         "",
         "WHAT THE RECORD SAYS",
         known,
         "",
-        "WHAT LOOKS WRONG",
+        "ALSO WORTH A CLOSER LOOK" if suspect else "",
         suspect,
-        "",
+        "These were flagged by a local consistency check, which can be wrong in "
+        "both directions. Treat them as hints, not findings." if suspect else "",
+        "" if suspect else "",
         "Where to look, in order:",
         "- The publisher's landing page for the DOI, or the arXiv abstract page "
         "— its 'Journal reference' and 'Comments' fields often name the venue a "
@@ -805,8 +806,12 @@ def check_metadata_prompt(*, entry: Entry,
         "cannot cite is worth less than 'unknown'.",
         "- Never report a value you reasoned to from the topic, the authors or "
         "the year. Every character must come from a page you opened.",
-        "- Report only the fields listed above. Say 'correct' for the ones that "
-        "turn out to be right.",
+        "- Give a verdict for venue, year AND type — all three, whether or not "
+        "they were flagged above. 'correct' is the expected answer for a record "
+        "that is right, and a useful one: it is what stops this entry being "
+        "checked again.",
+        "- Answer 'unknown' rather than guessing. A field left unconfirmed keeps "
+        "the value it has, which is the safe outcome.",
         "",
         "Reply with a single JSON object, no markdown fence, matching this shape:",
         json.dumps(schema, indent=2),
