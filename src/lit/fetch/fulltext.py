@@ -40,10 +40,58 @@ class FullText:
     text: str
     source: str
     pdf_path: Path | None = None
+    # Page accounting, when the source was a PDF. `pages_read < pages` means the
+    # document was sampled rather than read end to end.
+    pages: int | None = None
+    pages_read: int | None = None
 
     @property
     def chars(self) -> int:
         return len(self.text)
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.pages and self.pages_read and self.pages_read < self.pages)
+
+
+@dataclass
+class PdfText:
+    text: str
+    pages: int = 0
+    pages_read: int = 0
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.pages and self.pages_read < self.pages)
+
+
+def select_pages(total: int, budget: int) -> list[int]:
+    """Choose which pages of a long document to read.
+
+    Reading the first N pages of a 400-page book gets you chapter one and
+    nothing else. Front matter carries the table of contents and preface — the
+    map of the whole work — the closing pages carry the conclusions, and the
+    body is sampled evenly in between so it is represented rather than skipped.
+    """
+    if budget <= 0 or total <= budget:
+        return list(range(total))
+
+    # The floors below must not push front+back past the budget, or a budget of
+    # one or two pages would silently return more than asked for.
+    front = min(max(1, budget // 3), budget)
+    back = max(1, budget // 4) if budget - front >= 1 else 0
+    middle = max(0, budget - front - back)
+
+    pages = list(range(min(front, total)))
+    lo, hi = front, total - back
+    if middle > 0 and hi > lo:
+        step = (hi - lo) / middle
+        pages += [int(lo + i * step) for i in range(middle)]
+    if back:
+        pages += list(range(max(0, total - back), total))
+
+    selected = sorted({p for p in pages if 0 <= p < total})
+    return selected[:budget]
 
 
 def fetch_fulltext(
@@ -65,29 +113,39 @@ def fetch_fulltext(
     dest = pdf_dir / f"{key}.pdf"
 
     if not refresh and cache.exists():
-        cached = cache.read_text(encoding="utf-8", errors="replace")
-        if len(cached) >= MIN_USABLE_CHARS:
-            return FullText(cached, "cache", dest if dest.exists() else None)
+        cached = _read_cache(cache)
+        # Scaled check, or a cached sample of a long document would be rejected
+        # on reload as if extraction had failed.
+        if cached and _usable(cached.text, cached.pages_read):
+            cached.pdf_path = dest if dest.exists() else None
+            return cached
+
+    def read_pdf(path: Path) -> PdfText:
+        return extract_pdf(
+            path,
+            max_pages=cfg.max_read_pages,
+            long_document_pages=cfg.long_document_pages,
+        )
 
     # 1. A PDF the user handed us wins over anything on the network.
     if local_pdf and Path(local_pdf).exists():
-        text = pdf_to_text(Path(local_pdf))
-        if _usable(text):
+        got = read_pdf(Path(local_pdf))
+        if _usable(got.text, got.pages_read):
             if Path(local_pdf).resolve() != dest.resolve():
                 dest.write_bytes(Path(local_pdf).read_bytes())
-            return _cache(cache, FullText(text, f"local:{Path(local_pdf).name}", dest))
+            return _cache(cache, _full(got, f"local:{Path(local_pdf).name}", dest))
 
     # 2. A PDF we already downloaded for this key.
     if not refresh and dest.exists():
-        text = pdf_to_text(dest)
-        if _usable(text):
-            return _cache(cache, FullText(text, "cache-pdf", dest))
+        got = read_pdf(dest)
+        if _usable(got.text, got.pages_read):
+            return _cache(cache, _full(got, "cache-pdf", dest))
 
     for url, label in _pdf_candidates(http, meta, cfg):
         if http.download(url, dest, max_mb=cfg.max_pdf_mb):
-            text = pdf_to_text(dest)
-            if _usable(text):
-                return _cache(cache, FullText(text, label, dest))
+            got = read_pdf(dest)
+            if _usable(got.text, got.pages_read):
+                return _cache(cache, _full(got, label, dest))
             dest.unlink(missing_ok=True)
 
     for url, label in _html_candidates(meta):
@@ -114,20 +172,24 @@ def _fallback_resolver(http: HttpClient, meta: PaperMeta, *, cfg: FetchConfig,
     if not meta.doi:
         return None  # both mechanisms are DOI-keyed
 
+    def read_pdf(path: Path) -> PdfText:
+        return extract_pdf(path, max_pages=cfg.max_read_pages,
+                           long_document_pages=cfg.long_document_pages)
+
     if cfg.fallback_url_template:
         url = cfg.fallback_url_template.replace("{doi}", meta.doi)
         if http.download(url, dest, max_mb=cfg.max_pdf_mb):
-            text = pdf_to_text(dest)
-            if _usable(text):
-                return FullText(text, "fallback-url", dest)
+            got = read_pdf(dest)
+            if _usable(got.text, got.pages_read):
+                return _full(got, "fallback-url", dest)
             dest.unlink(missing_ok=True)
         # Not a direct PDF: these endpoints usually serve a viewer page with the
         # document embedded, so follow the embedded link.
         embedded = _embedded_pdf_url(http, url)
         if embedded and http.download(embedded, dest, max_mb=cfg.max_pdf_mb):
-            text = pdf_to_text(dest)
-            if _usable(text):
-                return FullText(text, "fallback-url", dest)
+            got = read_pdf(dest)
+            if _usable(got.text, got.pages_read):
+                return _full(got, "fallback-url", dest)
             dest.unlink(missing_ok=True)
 
     if cfg.fallback_cmd:
@@ -140,9 +202,9 @@ def _fallback_resolver(http: HttpClient, meta: PaperMeta, *, cfg: FetchConfig,
         except (OSError, subprocess.SubprocessError):
             return None
         if proc.returncode == 0 and dest.exists():
-            text = pdf_to_text(dest)
-            if _usable(text):
-                return FullText(text, "fallback-cmd", dest)
+            got = read_pdf(dest)
+            if _usable(got.text, got.pages_read):
+                return _full(got, "fallback-cmd", dest)
             dest.unlink(missing_ok=True)
 
     return None
@@ -223,20 +285,52 @@ def _html_candidates(meta: PaperMeta) -> list[tuple[str, str]]:
 # Extraction
 # --------------------------------------------------------------------------
 
-def pdf_to_text(path: Path) -> str:
-    """Extract text from a PDF. Empty string if it has no usable text layer."""
+def extract_pdf(path: Path, *, max_pages: int | None = None,
+                long_document_pages: int | None = None) -> PdfText:
+    """Extract text from a PDF, optionally sampling a long document.
+
+    `max_pages` only bites once the document exceeds `long_document_pages`, so
+    ordinary papers are always read end to end and only books, theses and long
+    reports are sampled. Omitted stretches are marked in the text so a reader
+    knows what it is not seeing.
+    """
     try:
         import fitz  # PyMuPDF
     except ImportError:  # pragma: no cover
-        return ""
+        return PdfText("")
     try:
         with fitz.open(path) as doc:
             if doc.is_encrypted and not doc.authenticate(""):
-                return ""
-            pages = [doc[i].get_text("text") for i in range(doc.page_count)]
+                return PdfText("")
+            total = doc.page_count
+
+            if max_pages and (long_document_pages is None
+                              or total > long_document_pages):
+                wanted = select_pages(total, max_pages)
+            else:
+                wanted = list(range(total))
+
+            chunks: list[str] = []
+            previous: int | None = None
+            for i in wanted:
+                if previous is not None and i > previous + 1:
+                    skipped = i - previous - 1
+                    chunks.append(
+                        f"\n\n[... {skipped} page(s) omitted "
+                        f"(pages {previous + 2}–{i}) ...]\n\n"
+                    )
+                chunks.append(doc[i].get_text("text"))
+                previous = i
     except Exception:
-        return ""
-    return _tidy(("\n\n".join(pages)))
+        return PdfText("")
+
+    return PdfText(text=_tidy("\n\n".join(chunks)), pages=total,
+                   pages_read=len(wanted))
+
+
+def pdf_to_text(path: Path, *, max_pages: int | None = None) -> str:
+    """Text of a PDF, or an empty string if it has no usable text layer."""
+    return extract_pdf(path, max_pages=max_pages, long_document_pages=0).text
 
 
 def _html_to_text(http: HttpClient, url: str) -> str:
@@ -276,16 +370,55 @@ def _tidy(text: str) -> str:
     return "\n".join(line.strip() for line in text.split("\n")).strip()
 
 
-def _usable(text: str) -> bool:
-    return len(text or "") >= MIN_USABLE_CHARS
+def _usable(text: str, pages_read: int | None = None) -> bool:
+    """Did extraction actually produce a readable document?
+
+    The flat threshold catches scanned PDFs and captcha walls. When only a
+    sample of a long document was extracted there is legitimately less text, so
+    the bar scales to the pages actually read — otherwise a real but sparsely
+    typeset book would be mistaken for a failed extraction and filed UNVERIFIED.
+    """
+    n = len(text or "")
+    if pages_read:
+        return n >= min(MIN_USABLE_CHARS, max(600, pages_read * 250))
+    return n >= MIN_USABLE_CHARS
+
+
+def _full(got: PdfText, source: str, pdf_path: Path | None) -> FullText:
+    return FullText(text=got.text, source=source, pdf_path=pdf_path,
+                    pages=got.pages or None, pages_read=got.pages_read or None)
+
+
+# The cache is a plain .txt file, so page accounting rides in a header line that
+# is stripped on read. Without it a cache hit would silently turn a sampled read
+# back into an apparently complete one.
+_CACHE_HEADER = "<!--lit:pages="
 
 
 def _cache(path: Path, ft: FullText) -> FullText:
     try:
-        path.write_text(ft.text, encoding="utf-8")
+        header = ""
+        if ft.pages:
+            header = f"{_CACHE_HEADER}{ft.pages},read={ft.pages_read or ft.pages}-->\n"
+        path.write_text(header + ft.text, encoding="utf-8")
     except OSError:
         pass
     return ft
+
+
+def _read_cache(path: Path) -> FullText | None:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    pages = pages_read = None
+    if raw.startswith(_CACHE_HEADER):
+        line, _, rest = raw.partition("\n")
+        m = re.match(r"<!--lit:pages=(\d+),read=(\d+)-->", line)
+        if m:
+            pages, pages_read = int(m.group(1)), int(m.group(2))
+            raw = rest
+    return FullText(text=raw, source="cache", pages=pages, pages_read=pages_read)
 
 
 def truncate_for_llm(text: str, max_chars: int = 400_000) -> tuple[str, bool]:

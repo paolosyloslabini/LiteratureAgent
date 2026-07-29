@@ -65,3 +65,8 @@ def test_install_is_idempotent(tmp_path):
 def test_skill_documents_refresh():
     assert "lit refresh" in SKILL_BODY
     assert "lit reread" in SKILL_BODY
+
+
+def test_skill_explains_partial_reads():
+    assert "partial_read" in SKILL_BODY
+    assert "sampled" in SKILL_BODY

@@ -92,6 +92,26 @@ pass.
 If no full text can be reached, the entry is saved `UNVERIFIED` with **blank**
 summaries. Drop the PDF into `pdfs/inbox/` and run `lit inbox` to fill it in.
 
+**Books and long sources are sampled, not swallowed.** Feeding a 400-page book
+to a model is slow and expensive and produces nothing a good sample wouldn't.
+Anything longer than `fetch.long_document_pages` (50) is read as
+`fetch.max_read_pages` (10) pages: the front matter and table of contents, an
+even spread through the body, and the closing pages, with the omitted stretches
+marked in the text. Ordinary papers — including 40-page ones with appendices —
+are always read end to end.
+
+Such an entry is recorded as a partial read and says so everywhere it appears:
+
+```
+$ lit show somebook
+PARTIAL READ — 10 of 412 pages (sampled). The summary below covers that
+sample, not the whole work.
+```
+
+The reader is told it is seeing a sample and instructed never to report findings
+or numbers from pages it cannot see. Raise the budget with
+`lit config set fetch.max_read_pages 40`, or set it to `0` for no limit.
+
 Reference lists always come from the metadata APIs, never from the model.
 
 A library outlives the day it was built, so `lit refresh` re-fetches citation
@@ -181,6 +201,8 @@ email = ""              # enables Unpaywall + polite-pool rate limits
 semantic_scholar_api_key = ""
 fallback_url_template = ""   # last-resort resolver; see "Paywalls" below
 fallback_cmd = ""
+long_document_pages = 50     # longer than this counts as a book, not a paper
+max_read_pages = 10          # pages sampled from such a document (0 = no limit)
 ```
 
 Override per command with `--model <alias>` and `--parallel N`, or per role with

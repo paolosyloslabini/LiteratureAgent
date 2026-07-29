@@ -101,6 +101,19 @@ class FetchConfig:
     timeout_s: int = 60
     max_pdf_mb: int = 60
 
+    # ---- read budget for long documents -------------------------------------
+    # A paper is read end to end. A book, thesis or long report is not: feeding
+    # 400 pages to a model is slow and expensive, and the result is no better
+    # than a well-chosen sample.
+    #
+    # Anything longer than `long_document_pages` counts as a long source, and
+    # only `max_read_pages` of it are extracted — front matter (table of
+    # contents, preface, introduction), an even spread through the body, and the
+    # closing pages. Entries read this way are marked as partial reads so a
+    # sampled summary is never presented as a complete one.
+    long_document_pages: int = 50
+    max_read_pages: int = 10
+
     # ---- last-resort full-text resolver -------------------------------------
     # Tried only after every open-access route (arXiv, PMC, Unpaywall, OpenAlex,
     # publisher OA, local PDFs) has failed. Both ship empty; nothing is

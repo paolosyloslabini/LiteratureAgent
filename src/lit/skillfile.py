@@ -90,6 +90,10 @@ lit find "LLM benchmarks for scientific discovery" -n 10 --json
   blank summaries. Never present an UNVERIFIED entry's content as if it were
   summarized — there is nothing there. Tell the user to drop the PDF in
   `pdfs/inbox/` and run `lit inbox`.
+- Books and other long sources are **sampled**, not read whole. Such entries
+  have `partial_read: true` and a `coverage` string like `10 of 412 pages
+  (sampled)`. Say so when you cite one, and never imply its summary covers the
+  whole work. `lit config set fetch.max_read_pages <n>` raises the budget.
 
 ## Keeping a library current
 

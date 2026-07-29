@@ -128,7 +128,9 @@ def process_inbox(ctx: Ctx, *, keep: bool = False,
 
 def _identify(path: Path) -> InboxItem:
     item = InboxItem(path=path)
-    text = pdf_to_text(path)
+    # Only the first pages are needed to identify a document; extracting a
+    # 400-page book to read its title page is pure waste.
+    text = pdf_to_text(path, max_pages=3)
     if not text:
         item.error = "no extractable text (scanned image PDF?)"
         return item

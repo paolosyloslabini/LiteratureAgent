@@ -46,7 +46,7 @@ _FM_ORDER = [
     "doi", "arxiv_id", "url",
     "status", "level", "level_reason",
     "tags", "citation_count",
-    "read_source", "pdf_path", "text_chars",
+    "read_source", "pdf_path", "text_chars", "pages", "pages_read",
     "added", "updated",
     "bibtex", "references",
 ]
@@ -138,6 +138,8 @@ def loads(text: str) -> Entry:
     entry.year = _as_int(data.get("year"))
     entry.citation_count = _as_int(data.get("citation_count"))
     entry.text_chars = _as_int(data.get("text_chars"))
+    entry.pages = _as_int(data.get("pages"))
+    entry.pages_read = _as_int(data.get("pages_read"))
     entry.references = [
         r for r in (Reference.coerce(x) for x in (data.get("references") or [])) if r
     ]

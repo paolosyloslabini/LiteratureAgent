@@ -38,7 +38,8 @@ class FakeHttp:
 
 @pytest.fixture
 def usable_pdf(monkeypatch):
-    monkeypatch.setattr(ft_mod, "pdf_to_text", lambda p: USABLE)
+    monkeypatch.setattr(ft_mod, "extract_pdf",
+                        lambda p, **kw: ft_mod.PdfText(USABLE, pages=8, pages_read=8))
 
 
 # --------------------------------------------------------------------------
@@ -105,7 +106,8 @@ def test_url_template_failure_is_not_fatal(tmp_path):
 
 
 def test_unusable_pdf_is_discarded(tmp_path, monkeypatch):
-    monkeypatch.setattr(ft_mod, "pdf_to_text", lambda p: "too short")
+    monkeypatch.setattr(ft_mod, "extract_pdf",
+                        lambda p, **kw: ft_mod.PdfText("too short", 1, 1))
     url = "https://example.org/10.1234/abcd"
     http = FakeHttp(downloads={url: True})
     cfg = FetchConfig(fallback_url_template="https://example.org/{doi}")

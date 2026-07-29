@@ -85,6 +85,12 @@ def entry_panel(entry: Entry, *, full: bool = False) -> Panel:
     if entry.url:
         lines.append(entry.url)
 
+    if entry.is_partial_read:
+        lines.append(
+            f"**PARTIAL READ — {entry.coverage()}.** The summary below covers that "
+            "sample, not the whole work."
+        )
+
     if entry.one_liner:
         lines += ["", f"> {entry.one_liner}"]
     elif not entry.is_verified:
@@ -118,6 +124,7 @@ def entry_panel(entry: Entry, *, full: bool = False) -> Panel:
     if full:
         prov = " · ".join(filter(None, [
             f"read via {entry.read_source}" if entry.read_source else "",
+            entry.coverage(),
             f"{entry.text_chars:,} chars" if entry.text_chars else "",
             f"pdf: {entry.pdf_path}" if entry.pdf_path else "",
             f"added {entry.added}",

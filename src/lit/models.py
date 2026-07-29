@@ -139,6 +139,10 @@ class Entry:
     read_source: str | None = None
     pdf_path: str | None = None
     text_chars: int | None = None
+    # Page accounting for PDF sources. `pages_read < pages` marks a partial
+    # read: a book or long report that was sampled rather than read end to end.
+    pages: int | None = None
+    pages_read: int | None = None
 
     added: str = field(default_factory=lambda: date.today().isoformat())
     updated: str = field(default_factory=lambda: date.today().isoformat())
@@ -150,6 +154,19 @@ class Entry:
     @property
     def is_verified(self) -> bool:
         return self.status == STATUS_VERIFIED
+
+    @property
+    def is_partial_read(self) -> bool:
+        """True when the summary came from a sample, not the whole document."""
+        return bool(self.pages and self.pages_read and self.pages_read < self.pages)
+
+    def coverage(self) -> str:
+        """Human-readable read coverage, e.g. '10 of 412 pages (sampled)'."""
+        if not self.pages:
+            return ""
+        if not self.is_partial_read:
+            return f"{self.pages} pages (complete)"
+        return f"{self.pages_read} of {self.pages} pages (sampled)"
 
     def detailed_summary_md(self) -> str:
         """Section-by-section summary rendered as Markdown."""

@@ -48,6 +48,7 @@ def read_paper_prompt(
     known_year: int | None,
     truncated: bool,
     needs_level: bool,
+    sampled_pages: tuple[int | None, int | None] | None = None,
 ) -> str:
     schema = {
         "one_liner": "string — ONE sentence, max 30 words, what this work "
@@ -107,6 +108,19 @@ def read_paper_prompt(
             "",
             "NOTE: the middle of this document was omitted to fit context. Summarize "
             "the sections you can actually see, and do not invent the rest.",
+        ]
+    if sampled_pages:
+        read, total = sampled_pages
+        parts += [
+            "",
+            f"IMPORTANT: this is a long document ({total} pages) and you are seeing "
+            f"only {read} of them — the front matter, an even spread through the "
+            "body, and the closing pages. Omitted stretches are marked in the text.",
+            "Summarize what the sample actually shows. Where the table of contents "
+            "or structure tells you a topic is covered in pages you cannot see, you "
+            "may say the work covers it, but never describe findings, arguments or "
+            "numbers from pages that were omitted. Prefer fewer, well-grounded "
+            "sections over guessing at the whole book.",
         ]
     if needs_level:
         parts += ["", rubric_text(),

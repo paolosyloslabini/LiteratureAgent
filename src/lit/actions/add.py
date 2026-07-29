@@ -163,6 +163,13 @@ def add_paper(
         warnings.append(
             f"document is {ft.chars:,} chars; the middle was omitted to fit context"
         )
+    if ft.partial:
+        warnings.append(
+            f"long document: {ft.pages_read} of {ft.pages} pages were read "
+            "(front matter, an even spread of the body, and the closing pages). "
+            "The summary covers that sample, not the whole work. Raise the "
+            "budget with `lit config set fetch.max_read_pages <n>`."
+        )
     ctx.vlog(f"[{key}] reading {len(text):,} chars via {ft.source}")
 
     try:
@@ -174,6 +181,7 @@ def add_paper(
                 known_year=meta.year,
                 truncated=truncated,
                 needs_level=verdict.needs_judgement,
+                sampled_pages=(ft.pages_read, ft.pages) if ft.partial else None,
             ),
             stdin_text="=== FULL TEXT BEGINS ===\n" + text,
             system=READER_SYSTEM,
@@ -185,6 +193,8 @@ def add_paper(
         entry.read_source = ft.source
         entry.pdf_path = _rel(ft.pdf_path, lib.path)
         entry.text_chars = ft.chars
+        entry.pages = ft.pages
+        entry.pages_read = ft.pages_read
         lib.save_entry(entry)
         return AddResult(
             "error",
@@ -197,6 +207,8 @@ def add_paper(
     entry.read_source = ft.source
     entry.pdf_path = _rel(ft.pdf_path, lib.path)
     entry.text_chars = ft.chars
+    entry.pages = ft.pages
+    entry.pages_read = ft.pages_read
 
     # Re-check the bar now that the model may have supplied the missing level.
     if not force and verdict.needs_judgement:

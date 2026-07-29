@@ -1078,6 +1078,8 @@ def _entry_json(e: Entry, full: bool = False) -> dict:
         "citation_count": e.citation_count, "citation": e.citation(),
         "key_findings": e.key_findings, "notes": e.notes,
         "added": e.added, "updated": e.updated,
+        "pages": e.pages, "pages_read": e.pages_read,
+        "partial_read": e.is_partial_read, "coverage": e.coverage(),
     }
     if full:
         data["sections"] = [{"name": s.name, "summary": s.summary} for s in e.sections]
