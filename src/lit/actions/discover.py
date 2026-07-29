@@ -5,34 +5,43 @@ pool *before* any expensive work happens, then workers fan out over it. That
 way two agents never read the same paper, and nothing already in the library is
 proposed twice.
 
-The pool is fed from two sources:
+Everything on the default path is free. The pool is fed from two sources that
+cost API calls rather than tokens:
 
-1. **Reference mining** (free, no LLM, no hallucination risk). Every entry
-   already in the library carries a structured reference list pulled from the
-   metadata APIs. Works cited by several of your papers but not yet in the
-   library are exactly the gaps worth filling. These are filtered for relevance
-   in one cheap LLM call before anything is read.
-2. **Scout agents** searching the web in parallel, each given a different angle
-   (foundational, recent, surveys/benchmarks, adjacent fields, critical work).
-   One agent asked for "10 good papers" returns a monoculture; five agents with
-   different briefs return a spread. Each is handed the titles already in the
-   library and told not to propose them.
+1. **Reference mining** (no LLM, no hallucination risk). Every entry already in
+   the library carries a structured reference list pulled from the metadata
+   APIs. Works cited by several of your papers but not yet in the library are
+   exactly the gaps worth filling.
+2. **Indexed search** across Crossref, OpenAlex and arXiv. The same query is
+   asked several ways — best keyword match, most-cited, published recently,
+   reviews only, arXiv preprints — because one query asked one way returns a
+   monoculture. Each facet is a plain HTTP request that returns real works with
+   real identifiers, citation counts and abstracts.
+
+`--parallel` adds a third source on top: **scout agents** searching the web,
+one per angle. They cost real tokens, so they are opt-in, and their angles are
+ordered to lead with what indexed search genuinely cannot do — adjacent fields
+that use different vocabulary, and critical or negative-result work, neither of
+which any keyword facet will surface.
 
 The pool is then ranked on two things, in this order of weight:
 
 1. **Relevance** — how well the paper answers what was actually asked. This is
    the one judgement here that cannot be computed, so it comes from a single
    LLM call scoring the whole pool at once. Scoring everything in one call
-   matters: a scout works from an *angle* ("foundational work", "recent work"),
-   not from the query, so its proposals need checking against the query just as
+   matters: a facet or a scout works from an *angle* ("most-cited work"), not
+   from the query, so its proposals need checking against the query just as
    much as a mined reference does.
 2. **Importance** — how much the work matters, computed in code from citation
    velocity and venue rank (the same metrics `quality.assess` uses), plus what
-   this library's own papers cite. The figures come from one free OpenAlex
-   lookup per candidate, made *before* ranking rather than during the read, so
-   the cut is informed by them.
+   this library's own papers cite. Search hits arrive carrying these figures;
+   anything else gets one free OpenAlex lookup, made *before* ranking rather
+   than during the read, so the cut is informed by them.
 
-Only then does the read fan-out start, one agent per paper.
+Papers are then filed from their metadata. Reading them in full is a separate,
+opt-in step (`--read` here, or `lit read` later), because a section-by-section
+summary of twenty papers is by far the most expensive thing this tool can do
+and most of those twenty will not turn out to be worth it.
 """
 
 from __future__ import annotations
@@ -41,7 +50,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date
 
-from ..fetch.metadata import from_openalex
+from ..fetch.metadata import PaperMeta, from_openalex, search_arxiv, search_openalex, search_works
 from ..llm import LLMError
 from ..models import normalize_arxiv, normalize_doi, slugify
 from ..prompts import (
@@ -87,15 +96,36 @@ VELOCITY_FULL_MARKS = 100.0
 RECENCY_ALLOWANCE_YEARS = 2
 
 # Reference mining can surface hundreds of works. Take the best-co-cited slice
-# rather than letting it swamp the pool the scouts contribute to.
+# rather than letting it swamp the pool the other sources contribute to.
 def _mined_intake(limit: int) -> int:
     return max(20, limit * 2)
 
 
 # Backstop on how many candidates get enriched and scored, for the case where
-# both sources come back unusually large.
+# the sources come back unusually large.
 def _pool_cap(limit: int) -> int:
     return max(40, limit * 4)
+
+
+# Share of the pool held open for candidates nothing else corroborates. Without
+# it, `triage_key` lets co-citation decide who gets *scored at all*, and the
+# library's existing shape quietly gatekeeps every new direction: a work that
+# no paper you own cites and only one source proposed is exactly what a search
+# for a topic you have not covered yet returns.
+UNCORROBORATED_QUOTA = 0.3
+
+# How far back "recent" reaches, for the recency facet.
+RECENT_YEARS = 2
+
+# The free facets. Each is one HTTP request; together they are the cheap
+# equivalent of pointing several scouts at different angles.
+SEARCH_FACETS: list[tuple[str, str]] = [
+    ("relevance", "best keyword match (Crossref + OpenAlex)"),
+    ("foundational", "most-cited work on the topic"),
+    ("recent", f"published in the last {RECENT_YEARS} years"),
+    ("surveys", "reviews and survey articles"),
+    ("preprints", "arXiv preprints, including work too new to be indexed"),
+]
 
 
 @dataclass
@@ -107,11 +137,14 @@ class Candidate:
     doi: str | None = None
     arxiv_id: str | None = None
     why: str = ""
-    # Which scout angles proposed this (agreement signal).
+    # The publisher's abstract where a source supplied one. Never model-written;
+    # it is what gives the ranking call something to judge beyond a bare title.
+    abstract: str = ""
+    # Which search facets and scout angles proposed this (agreement signal).
     angles: list[str] = field(default_factory=list)
     # How many library papers cite this (co-citation signal).
     cocitations: int = 0
-    source: str = "scout"  # scout | references | both
+    source: str = "scout"  # search | scout | references | both
     # Filled by `_enrich` from OpenAlex, before ranking.
     citation_count: int | None = None
     # Filled by `_score_relevance`. None means the pass did not run.
@@ -123,12 +156,19 @@ class Candidate:
                             else slugify(self.title, 120))
 
     @property
+    def corroborated(self) -> bool:
+        """Did more than one source independently point at this work?"""
+        return self.cocitations > 0 or len(self.angles) > 1
+
+    @property
     def triage_key(self) -> tuple:
         """Cheap pre-ranking order: how many sources corroborate this, then age.
 
         Only used to decide what to spend enrichment and scoring on when the
         pool is very large. It is not the rank — corroboration says a paper is
-        worth *looking at*, not that it is the best answer.
+        worth *looking at*, not that it is the best answer, which is why a slice
+        of the pool is reserved for candidates this ordering would bury (see
+        `UNCORROBORATED_QUOTA`).
         """
         return (-(len(self.angles) + self.cocitations), -(self.year or 0))
 
@@ -199,7 +239,8 @@ class Candidate:
             "title": self.title, "authors": self.authors, "year": self.year,
             "venue": self.venue, "doi": self.doi, "arxiv_id": self.arxiv_id,
             "why": self.why, "source": self.source,
-            "found_by_angles": len(self.angles), "cocitations": self.cocitations,
+            "found_by_angles": len(self.angles), "angles": list(self.angles),
+            "cocitations": self.cocitations,
             "citation_count": self.citation_count,
             "relevance": self.relevance,
             "importance": round(self.importance, 3),
@@ -214,17 +255,22 @@ class FindResult:
     scout_errors: list[str] = field(default_factory=list)
     pool_size: int = 0
     from_references: int = 0
+    from_search: int = 0
     from_scouts: int = 0
     dropped_off_topic: int = 0
+    # True when the candidates were filed without being read.
+    unread: bool = False
 
     def to_dict(self) -> dict:
         return {
             "candidates": [c.to_dict() for c in self.candidates],
             "results": [r.to_dict() for r in self.added],
             "scout_errors": self.scout_errors,
+            "unread": self.unread,
             "pool": {
                 "total": self.pool_size,
                 "from_references": self.from_references,
+                "from_search": self.from_search,
                 "from_scouts": self.from_scouts,
                 "dropped_off_topic": self.dropped_off_topic,
             },
@@ -236,12 +282,17 @@ def discover(
     query: str,
     *,
     limit: int = 10,
-    angles: int = 3,
+    angles: int = 5,
     per_angle: int | None = None,
     use_references: bool = True,
     use_web: bool = True,
+    use_scouts: bool = False,
 ) -> FindResult:
-    """Build the de-duplicated candidate pool. Nothing is read or added here."""
+    """Build the de-duplicated candidate pool. Nothing is read or added here.
+
+    `use_web` covers the free indexed search; `use_scouts` adds the LLM web
+    agents on top and is what `--parallel` turns on.
+    """
     lib = ctx.library
     entries = lib.entries()
     known_titles = [e.title for e in entries]
@@ -249,6 +300,10 @@ def discover(
     known_ids = {e.doi for e in entries if e.doi} | {
         f"arxiv:{e.arxiv_id}" for e in entries if e.arxiv_id
     }
+
+    # `--no-web` means "use only what my own library already cites". Scouts are
+    # an online source like any other, so it switches them off too.
+    use_scouts = use_scouts and use_web
 
     result = FindResult()
     pool: dict[str, Candidate] = {}
@@ -268,6 +323,11 @@ def discover(
         cur.year = cur.year or c.year
         cur.venue = cur.venue or c.venue
         cur.why = cur.why or c.why
+        cur.abstract = cur.abstract or c.abstract
+        if cur.citation_count is None:
+            cur.citation_count = c.citation_count
+        if not cur.authors:
+            cur.authors = list(c.authors)
         if cur.source != c.source:
             cur.source = "both"
 
@@ -288,8 +348,21 @@ def discover(
             for c in mined:
                 absorb(c)
 
-    # ---- source 2: web scouts, in parallel -------------------------------
+    # ---- source 2: indexed search, free ----------------------------------
     if use_web:
+        per_facet = max(5, limit)
+        ctx.log(
+            f"[bold]Searching[/bold] {len(SEARCH_FACETS)} indexes "
+            f"(Crossref, OpenAlex, arXiv) — no tokens spent…"
+        )
+        hits = _search_candidates(ctx, query, per_facet=per_facet)
+        result.from_search = len(hits)
+        for c in hits:
+            absorb(c)
+        ctx.vlog(f"  {len(hits)} candidates from indexed search")
+
+    # ---- source 3: web scouts, in parallel (opt-in, costs tokens) --------
+    if use_scouts:
         angle_list = DISCOVERY_ANGLES[:max(1, min(angles, len(DISCOVERY_ANGLES)))]
         per_angle = per_angle or max(3, (limit * 2) // len(angle_list))
         # Scouts are told about the library *and* about what reference mining
@@ -335,9 +408,10 @@ def discover(
     result.pool_size = len(considered)
     cap = _pool_cap(limit)
     if len(considered) > cap:
-        ctx.log(f"  pool of {len(considered)} trimmed to the {cap} "
-                f"best-corroborated before scoring")
-        considered = considered[:cap]
+        considered = _trim_pool(considered, cap)
+        solo = sum(1 for c in considered if not c.corroborated)
+        ctx.log(f"  pool of {result.pool_size} trimmed to {len(considered)} "
+                f"before scoring ({solo} held for uncorroborated work)")
 
     if considered:
         _enrich(ctx, considered)
@@ -355,20 +429,108 @@ def discover(
     return result
 
 
+def _trim_pool(candidates: list[Candidate], cap: int) -> list[Candidate]:
+    """Cut an oversized pool to `cap`, keeping room for uncorroborated work.
+
+    Ordering by corroboration alone means the only candidates ever scored are
+    the ones your library already points at or several sources happened to
+    agree on. On a topic you have not covered yet that is precisely the wrong
+    filter — the paper that opens a new direction is cited by none of your
+    entries and was found by one facet. So a share of the pool is reserved for
+    those, and only backfilled from the corroborated pile if too few exist.
+    """
+    if len(candidates) <= cap:
+        return candidates
+    strong = [c for c in candidates if c.corroborated]
+    solo = [c for c in candidates if not c.corroborated]
+
+    reserved = min(len(solo), int(round(cap * UNCORROBORATED_QUOTA)))
+    kept = strong[:cap - reserved] + solo[:reserved]
+    # Whichever pile ran short, top up from the other so the cap is filled.
+    if len(kept) < cap:
+        chosen = {id(c) for c in kept}
+        kept += [c for c in candidates if id(c) not in chosen][:cap - len(kept)]
+    return sorted(kept, key=lambda c: c.triage_key)
+
+
+def _search_candidates(ctx: Ctx, query: str, *, per_facet: int) -> list[Candidate]:
+    """Ask the free indexes the same question several different ways.
+
+    Runs the facets concurrently — they are independent HTTP requests to three
+    different services, so waiting on them one at a time is pure latency.
+    """
+    def run(facet: tuple[str, str]) -> list[Candidate]:
+        metas = _search_facet(ctx, query, facet[0], per_facet)
+        return [c for c in (_meta_to_candidate(m, facet[0]) for m in metas) if c]
+
+    runs = run_parallel(
+        SEARCH_FACETS, run,
+        workers=min(len(SEARCH_FACETS), max(2, ctx.workers)),
+        on_done=lambda r: ctx.vlog(
+            f"  facet {r.item[0]}: {len(r.value or [])} hits" if r.ok
+            else f"  facet {r.item[0]} failed: {r.error}"
+        ),
+    )
+    out: list[Candidate] = []
+    for r in runs:
+        if r.ok and r.value:
+            out += r.value
+    return out
+
+
+def _search_facet(ctx: Ctx, query: str, facet: str, limit: int) -> list[PaperMeta]:
+    """One facet of the free search. Split out so tests can stub the network."""
+    http = ctx.http
+    if facet == "foundational":
+        return search_openalex(http, query, limit=limit, sort="cited_by_count:desc")
+    if facet == "recent":
+        return search_openalex(http, query, limit=limit,
+                               from_year=date.today().year - RECENT_YEARS)
+    if facet == "surveys":
+        return search_openalex(http, query, limit=limit, kind="review")
+    if facet == "preprints":
+        return search_arxiv(http, query, limit=limit)
+    return search_works(http, query, limit, ctx.cfg.fetch)
+
+
+def _meta_to_candidate(meta: PaperMeta, facet: str) -> Candidate | None:
+    if not meta or not meta.title or len(meta.title) < 6:
+        return None
+    return Candidate(
+        title=meta.title,
+        authors=list(meta.authors),
+        year=meta.year,
+        venue=meta.venue,
+        doi=meta.doi,
+        arxiv_id=meta.arxiv_id,
+        abstract=meta.abstract or "",
+        citation_count=meta.citation_count,
+        angles=[facet],
+        source="search",
+    )
+
+
 def _enrich(ctx: Ctx, candidates: list[Candidate]) -> None:
     """Fill in citation count and venue from OpenAlex — one lookup each, no LLM.
 
     This is what lets importance be measured rather than guessed. It runs
     before the cut, unlike the metadata resolution during a read, because a
     citation count discovered after a paper has been dropped is no use.
+
+    Candidates that came from indexed search already carry their citation count
+    and venue, so they are skipped — there is nothing left to look up.
     """
-    ctx.log(f"[bold]Weighing[/bold] {len(candidates)} candidates "
+    pending = [c for c in candidates if c.citation_count is None or not c.venue]
+    if not pending:
+        ctx.vlog(f"  all {len(candidates)} candidates already carry their metrics")
+        return
+    ctx.log(f"[bold]Weighing[/bold] {len(pending)} candidates "
             f"(citations, venue)…")
 
     def look_up(c: Candidate):
         return _lookup_meta(ctx, c)
 
-    runs = run_parallel(candidates, look_up, workers=ctx.workers)
+    runs = run_parallel(pending, look_up, workers=ctx.workers)
     found = 0
     for r in runs:
         c: Candidate = r.item  # type: ignore[assignment]
@@ -391,7 +553,8 @@ def _enrich(ctx: Ctx, candidates: list[Candidate]) -> None:
         if not meta.title_matched:
             c.doi = c.doi or meta.doi
             c.arxiv_id = c.arxiv_id or meta.arxiv_id
-    ctx.vlog(f"  metadata found for {found}/{len(candidates)}")
+        c.abstract = c.abstract or meta.abstract
+    ctx.vlog(f"  metadata found for {found}/{len(pending)}")
 
 
 def _lookup_meta(ctx: Ctx, c: Candidate):
@@ -490,23 +653,35 @@ def mine_references(entries, known_slugs: set[str],
 
 
 def add_candidates(ctx: Ctx, candidates: list[Candidate], *,
-                   force: bool = False, extra_tags: list[str] | None = None
-                   ) -> list[AddResult]:
-    """Read and add candidates concurrently, one agent per paper.
+                   force: bool = False, extra_tags: list[str] | None = None,
+                   read: bool = False) -> list[AddResult]:
+    """Add candidates concurrently, one worker per paper.
 
     The pool was de-duplicated by the orchestrator, so no two workers here can
-    end up reading the same paper.
+    end up handling the same paper.
+
+    With `read=False` (the default) this is metadata only — no full text is
+    fetched and no reader agent runs, so a twenty-paper find costs nothing but
+    API calls. `read=True` fans the reader agents out as before, on a tighter
+    per-paper text budget than `lit add` uses.
     """
     if not candidates:
         return []
 
-    ctx.log(
-        f"[bold]Reading[/bold] {len(candidates)} papers ({ctx.workers} at a time)…"
-    )
+    if read:
+        ctx.log(
+            f"[bold]Reading[/bold] {len(candidates)} papers ({ctx.workers} at a time)…"
+        )
+    else:
+        ctx.log(f"[bold]Filing[/bold] {len(candidates)} papers from their metadata "
+                f"(unread — `lit read` to summarize them)…")
+
+    budget = ctx.cfg.llm.find_read_chars if read else None
 
     def work(c: Candidate) -> AddResult:
         return add_paper(
-            ctx, c.title, target=c.to_target(), force=force, extra_tags=extra_tags
+            ctx, c.title, target=c.to_target(), force=force, extra_tags=extra_tags,
+            read=read, max_chars=budget,
         )
 
     def report(r) -> None:

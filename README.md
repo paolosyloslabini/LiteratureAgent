@@ -61,7 +61,9 @@ lit add 10.1145/3292500.3330701              # by DOI
 lit add arxiv:1706.03762                     # by arXiv id
 lit add "Paywalled Paper" --pdf ~/Downloads/paper.pdf
 
-lit find "benchmarks for scientific discovery" -n 10
+lit find "benchmarks for scientific discovery" -n 10   # files them, reads nothing
+lit read --all --level A         # read the good ones, when you want them read
+lit find "..." --parallel        # add LLM scouts to the free index search
 
 lit search "causal discovery"                # which of my papers cover this?
 lit ask "What are the current capabilities?"  # read them and answer, with quotes
@@ -76,7 +78,8 @@ lit cite --level A --format bibtex -o refs.bib
 |---|---|
 | `lit new` / `libs` / `use` / `info` | manage libraries |
 | `lit add` | add one paper: fetch, read in full, summarize |
-| `lit find` | search a topic and add papers, in parallel |
+| `lit find` | search a topic and file the papers that fit (no tokens by default) |
+| `lit read` | read filed papers in full and write their summaries |
 | `lit inbox` | adopt PDFs you dropped in `pdfs/inbox/` |
 | `lit refresh` | re-fetch citations, references and venues (no LLM) |
 | `lit ls` / `show` / `note` / `rm` | browse and annotate |
@@ -160,37 +163,86 @@ counts, reference lists and venues for entries you already have — and picks up
 the DOI when a preprint you added has since been published. It is network-only:
 no LLM call, nothing re-read, summaries and notes untouched.
 
-### `find` is an orchestrator, not a swarm
+### `find` spends API calls, not tokens
 
 One process builds the whole candidate pool and de-duplicates it *before* any
-expensive work starts, so two agents never read the same paper:
+expensive work starts, so two agents never handle the same paper. Everything on
+the default path is free:
 
-1. **Reference mining** — free and hallucination-proof. Works cited by several
-   papers already in your library, but missing from it, are exactly the gaps
-   worth filling.
-2. **Scout agents** search the web in parallel, each on a different angle
-   (foundational / recent / surveys & benchmarks / adjacent fields / critical
-   work). Each is handed the titles you already have, plus what mining just
-   surfaced, and told not to propose them.
+1. **Reference mining** — hallucination-proof. Works cited by several papers
+   already in your library, but missing from it, are exactly the gaps worth
+   filling.
+2. **Indexed search** across Crossref, OpenAlex and arXiv. The same query is
+   asked five ways — best keyword match, most-cited, published in the last two
+   years, reviews only, arXiv preprints — because one query asked one way
+   returns a monoculture. Each facet is a plain HTTP request returning real
+   works with real DOIs, citation counts and abstracts.
+
+That is the whole search. No agent runs, and the only model call in the entire
+command is the single pass that ranks the pool.
+
+**`--parallel` adds the scout agents** on top: LLM agents searching the web, one
+per angle. They cost real tokens — an agentic loop re-sends its transcript every
+turn, so fetched pages get paid for repeatedly — which is exactly why they are
+opt-in. Their angles lead with what a keyword index cannot do: adjacent fields
+that name the problem differently, and critical or negative-result work. The
+facets above already cover most-cited, recent, surveys and preprints for nothing,
+so the scouts are pointed at the rest.
 
 The pool is then ranked on **relevance** to what you asked (65%) and
 **importance** (35%), and cut to `-n`:
 
-- *Relevance* is one cheap call scoring the whole pool at once. Every candidate
-  is scored the same way whatever found it — a scout works from an angle, not
-  from your query, so its proposals need checking just as much as a mined
-  reference does. Anything scoring below 0.35 is dropped outright, so a famous
-  paper that does not answer the question cannot take a slot on reputation.
+- *Relevance* is one cheap call scoring the whole pool at once, each candidate
+  shown with the opening of its abstract. Every candidate is scored the same way
+  whatever found it — a facet works from an angle, not from your query, so its
+  hits need checking just as much as a mined reference does. Anything scoring
+  below 0.35 is dropped outright, so a famous paper that does not answer the
+  question cannot take a slot on reputation.
 - *Importance* is computed, not judged: citation velocity and venue rank (the
-  same metrics behind the levels below), from one free OpenAlex lookup per
-  candidate made **before** the cut. Papers from the last two years are scored
-  on venue alone, so new work is not buried for having had no time to
-  accumulate citations, and a paper nothing is known about is treated as
-  middling rather than worthless. Co-citation in your library and agreement
-  between scout angles contribute the remaining weight.
+  same metrics behind the levels below). Indexed hits arrive carrying those
+  figures; anything else gets one free OpenAlex lookup **before** the cut.
+  Papers from the last two years are scored on venue alone, so new work is not
+  buried for having had no time to accumulate citations, and a paper nothing is
+  known about is treated as middling rather than worthless. Co-citation in your
+  library and agreement between sources contribute the remaining weight.
+
+When the pool is larger than the scoring cap, corroboration decides who gets
+scored — but not exclusively. A share of the cap is reserved for candidates
+nothing corroborates, because on a topic you have not covered yet the paper that
+opens a new direction is cited by none of your entries and was found by one
+facet. Ranking on agreement alone would let your library's existing shape decide
+what it is allowed to learn next.
 
 `lit find` prints both numbers per candidate, so you can see why the cut fell
-where it did. Only then does the read fan-out begin, one agent per paper.
+where it did.
+
+### Reading is a separate, deliberate purchase
+
+Filing a paper and reading it are two steps. `lit find` does the first: the
+bibliographic record, the publisher's abstract, references and a level from
+metrics, all from API calls, and the entry is marked `unread`.
+
+Reading is the expensive half — a section-by-section summary of twenty papers is
+by far the most costly thing this tool can do, and most of those twenty will not
+turn out to be worth it. So you buy it per paper, once you can see what you got:
+
+```bash
+lit find "benchmarks for scientific discovery" -n 20   # cheap; nothing is read
+lit ls --status unread                                 # see what turned up
+lit read vaswani2017attention                          # read the ones that matter
+lit read --all --level A -n 5                          # or the best of the backlog
+lit find "..." -n 10 --read                            # or read as you go
+```
+
+An unread entry is not a broken one. Its abstract is in the search index, so
+`lit search` finds it, and `lit ask` will read it from source when it needs to.
+That is different from `UNVERIFIED`, which means the full text *was* looked for
+and could not be found.
+
+When a read does happen, the paper's own bibliography is stripped before the
+text is sent. The reader is told not to summarize it, and every command that
+needs the citations gets them as structured data from the metadata APIs — so it
+was only ever paying for weight.
 
 ### Levels come from metrics, not vibes
 
@@ -245,6 +297,8 @@ default_library = "llm-benchmarks"
 model = "sonnet"        # fallback for any role below
 max_parallel = 4        # concurrent agents
 timeout_s = 900
+read_chars = 400_000    # paper text per reading prompt (`lit add`, `lit read`)
+find_read_chars = 150_000   # tighter budget for `lit find --read`, a whole batch
 
 [llm.models]            # cheap steps run cheap
 scout = "haiku"         # web search for candidates
@@ -263,8 +317,10 @@ long_document_pages = 50     # longer than this counts as a book, not a paper
 max_read_pages = 10          # pages sampled from such a document (0 = no limit)
 ```
 
-Override per command with `--model <alias>` and `--parallel N`, or per role with
-`LIT_MODEL_READER=opus`. Library-level settings live in `library.toml`:
+Override per command with `--model <alias>` and `--workers N` (`-j`), or per role
+with `LIT_MODEL_READER=opus`. `--workers` sets how many agents run at once;
+`lit find --parallel` is a different switch, deciding whether the scout agents
+run at all. Library-level settings live in `library.toml`:
 
 ```bash
 lit config set --library min_level A

@@ -35,6 +35,10 @@ SCOUT_SYSTEM = (
     "an id you are not sure about must be left null rather than guessed."
 )
 
+# How much of each abstract the ranking call sees. Enough to tell what a paper
+# actually does; short enough that a 40-candidate pool stays a cheap call.
+ABSTRACT_SNIPPET = 260
+
 
 # --------------------------------------------------------------------------
 # Reading a paper -> entry fields
@@ -180,7 +184,15 @@ def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
         "ACL, CVPR, Nature, Science and peers), and work by established groups.",
         "- Give the DOI or arXiv id whenever you can find it; use null when you "
         "cannot. A wrong identifier is worse than a missing one.",
-        "- Do not propose blog posts, marketing pages or unrefereed write-ups.",
+        "- Do not propose product announcements, marketing pages or vendor blog "
+        "posts. Peer review is not the test: a lab's benchmark or dataset "
+        "released as a preprint with a public leaderboard, artifact or code "
+        "release is real work and belongs here.",
+        "- Prefer what indexed keyword search would miss — work in a "
+        "neighbouring field that names the problem differently, and work whose "
+        "contribution is a limitation, a failed replication or a negative "
+        "result. Papers that any citation-sorted search returns are already "
+        "covered.",
     ]
     if exclude_titles:
         listed = "\n".join(f"  - {t}" for t in exclude_titles[:60])
@@ -205,6 +217,12 @@ def rank_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
     rank and citation velocity (see `Candidate.importance`) — those are real
     numbers we already hold by this point, and asking a model to guess at them
     would only add noise to figures we can measure.
+
+    Each candidate gets the opening of its abstract where a source supplied one.
+    This is the one place extra tokens are worth spending: candidates now come
+    from keyword facets rather than from an agent that read around the topic
+    and wrote a note, and a title alone is thin evidence for the cut that
+    decides which papers exist in the library at all.
     """
     lines = []
     for i, c in enumerate(candidates):
@@ -217,14 +235,16 @@ def rank_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
             head += f" — {c.citation_count} citations"
         lines.append(head)
         marks = []
-        if c.angles:
-            marks.append(f"proposed by {len(c.angles)} independent search angle(s)")
+        if len(c.angles) > 1:
+            marks.append(f"found by {len(c.angles)} independent searches")
         if c.cocitations:
             marks.append(f"cited by {c.cocitations} paper(s) already in this library")
         if marks:
             lines.append(f"      {' · '.join(marks)}")
         if c.why:
             lines.append(f"      note: {c.why}")
+        elif getattr(c, "abstract", ""):
+            lines.append(f"      abstract: {_snippet(c.abstract, ABSTRACT_SNIPPET)}")
     listed = "\n".join(lines)
 
     schema = {
@@ -263,12 +283,21 @@ def rank_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
     ])
 
 
+# Ordered by what a keyword index *cannot* do, because the free facets in
+# `discover.SEARCH_FACETS` already cover most-cited, recent, surveys and
+# preprints for nothing. Scout agents cost real tokens, so when only some of
+# these run, the budget should go to the angles that need a reader who can
+# follow an idea across vocabularies rather than match strings: work in a
+# neighbouring field that never uses your terms, and work that reports the
+# limitation or the failed replication.
 DISCOVERY_ANGLES = [
+    "adjacent subfields and applications that approach the same problem "
+    "differently, including work that describes it in different vocabulary",
+    "critical, negative-result, replication-failure or limitation-focused work "
+    "on this topic",
     "the foundational and most-cited works that defined this area",
     "the most recent work (last two years), including strong preprints",
     "surveys, benchmarks, datasets and evaluation methodology in this area",
-    "adjacent subfields and applications that approach the same problem differently",
-    "critical, negative-result or limitation-focused work on this topic",
 ]
 
 
@@ -479,14 +508,32 @@ def find_claim_source_prompt(*, claim: str, scope: str) -> str:
 # Helpers
 # --------------------------------------------------------------------------
 
+def _snippet(text: str, limit: int) -> str:
+    """First `limit` characters of a single-line rendering, cut on a word."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit]
+    head, sep, _ = cut.rpartition(" ")
+    return (head if sep and len(head) > limit * 0.6 else cut) + "…"
+
+
 def _entry_card(e: Entry) -> str:
     findings = "\n".join(f"    - {f}" for f in e.key_findings[:5])
     sections = "\n".join(
         f"    {s.name}: {s.summary[:300]}" for s in e.sections[:12]
     )
+    # An entry filed but not yet read has no agent-written summary, only the
+    # publisher's abstract. Showing that is what keeps it visible here: it was
+    # added because it matched a query, and it should not be unfindable until
+    # someone pays to read it.
+    stand_in = ""
+    if not e.one_liner and e.abstract.strip():
+        stand_in = f"  Abstract (not yet read): {_snippet(e.abstract, 600)}"
     return "\n".join(filter(None, [
         f"[{e.key}] {e.title} — {e.citation()} (level {e.level}, {e.type})",
-        f"  One-liner: {e.one_liner or '(none — unread)'}",
+        f"  One-liner: {e.one_liner or '(none — not read yet)'}",
+        stand_in,
         f"  Tags: {', '.join(e.tags)}" if e.tags else "",
         f"  Key findings:\n{findings}" if findings else "",
         f"  Sections:\n{sections}" if sections else "",

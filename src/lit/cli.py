@@ -20,7 +20,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import bundle, entryfile
-from .actions.add import add_paper, link_references, reread as reread_action
+from .actions.add import (
+    add_paper,
+    link_references,
+    read_entries,
+    reread as reread_action,
+)
 from .actions.ask import ask as ask_action
 from .actions.claim import trace_claim
 from .actions.context import Ctx
@@ -30,7 +35,7 @@ from .actions.refresh import refresh_entries
 from .actions.search import search as search_action
 from .config import CONFIG_PATH, Config, load_config
 from .library import Library, LibraryError, list_libraries, normalize_name, resolve_library
-from .models import LEVELS, STATUS_VERIFIED, Entry, level_rank
+from .models import LEVELS, STATUS_UNREAD, STATUS_VERIFIED, Entry, level_rank
 from .render import chain_tree, entries_table, entry_panel, print_answer
 from .store import Store
 
@@ -51,7 +56,8 @@ class State:
     verbose: bool = False
     yes: bool = False
     model: Optional[str] = None
-    parallel: Optional[int] = None
+    # Concurrency cap (`--workers`), not the `find --parallel` switch.
+    workers: Optional[int] = None
     _cfg: Optional[Config] = None
 
     @property
@@ -60,8 +66,8 @@ class State:
             self._cfg = load_config()
             if self.model:
                 self._cfg.llm.override_model = self.model
-            if self.parallel:
-                self._cfg.llm.max_parallel = self.parallel
+            if self.workers:
+                self._cfg.llm.max_parallel = self.workers
         return self._cfg
 
 
@@ -121,15 +127,18 @@ def main_callback(
     model: Optional[str] = typer.Option(
         None, "--model", help="Force one model for every agent role in this command "
                               "(e.g. haiku, sonnet, opus)."),
-    parallel: Optional[int] = typer.Option(
-        None, "--parallel", help="Max concurrent agents (default: llm.max_parallel)."),
+    workers: Optional[int] = typer.Option(
+        None, "--workers", "-j",
+        help="Max concurrent agents (default: llm.max_parallel). This is how "
+             "MANY run at once; `lit find --parallel` is what decides whether "
+             "the scout agents run at all."),
 ):
     state.library_name = library
     state.json_mode = json_out
     state.verbose = verbose
     state.yes = yes
     state.model = model
-    state.parallel = parallel
+    state.workers = workers
 
 
 # --------------------------------------------------------------------------
@@ -353,13 +362,17 @@ def cmd_add(
                                help="Add even if it fails the quality bar."),
     refresh: bool = typer.Option(False, "--refresh",
                                  help="Re-fetch and re-read an entry already present."),
+    no_read: bool = typer.Option(
+        False, "--no-read",
+        help="File it from its metadata without reading it. `lit read <key>` "
+             "summarizes it later."),
     tag: list[str] = typer.Option([], "--tag", "-t", help="Extra tag (repeatable)."),
 ):
     """Add one paper: fetch it, read the whole thing, and summarize it."""
     ctx = _ctx()
     try:
         res = add_paper(ctx, query, local_pdf=pdf, force=force, refresh=refresh,
-                        extra_tags=list(tag))
+                        extra_tags=list(tag), read=not no_read)
         if res.entry:
             link_references(ctx, res.entry)
     finally:
@@ -385,23 +398,43 @@ def cmd_add(
 def cmd_find(
     query: str = typer.Argument(..., help="Topic or request, in plain language."),
     limit: int = typer.Option(10, "-n", "--limit", help="Max papers to add."),
-    angles: int = typer.Option(3, "--angles",
-                               help="How many scout agents to run in parallel (1-5)."),
+    parallel: bool = typer.Option(
+        False, "--parallel", "-P",
+        help="Also run LLM scout agents, one per angle, alongside the free "
+             "index search. Finds work keyword search cannot — and costs "
+             "tokens for it."),
+    read: bool = typer.Option(
+        False, "--read",
+        help="Read each paper in full and write its summaries now. Off by "
+             "default: papers are filed from their metadata, and `lit read` "
+             "summarizes the ones you decide are worth it."),
+    angles: int = typer.Option(5, "--angles",
+                               help="How many scout angles to run with --parallel (1-5)."),
     review: bool = typer.Option(
         False, "--review", help="Show the candidates and ask before adding any."),
     dry_run: bool = typer.Option(False, "--dry-run",
                                  help="List candidates and stop."),
     no_refs: bool = typer.Option(
         False, "--no-refs", help="Skip mining the references of existing entries."),
-    no_web: bool = typer.Option(False, "--no-web", help="Skip the web scouts."),
+    no_web: bool = typer.Option(
+        False, "--no-web",
+        help="Skip the online search entirely; use only what your library cites."),
     force: bool = typer.Option(False, "--force", "-f", help="Ignore the quality bar."),
     tag: list[str] = typer.Option([], "--tag", "-t", help="Tag everything added."),
 ):
-    """Search for papers on a topic and add them, reading each one in parallel."""
+    """Search a topic and add the papers that fit.
+
+    The default path spends no tokens on searching: Crossref, OpenAlex and
+    arXiv are queried several ways, the references of your own entries are
+    mined, and one cheap call ranks the pool against your query. Papers are
+    filed from their metadata; `--read` (or `lit read` afterwards) buys the
+    full section-by-section summaries.
+    """
     ctx = _ctx()
     try:
         found = discover(ctx, query, limit=limit, angles=angles,
-                         use_references=not no_refs, use_web=not no_web)
+                         use_references=not no_refs, use_web=not no_web,
+                         use_scouts=parallel)
 
         if not found.candidates:
             msg = "No new candidates found."
@@ -429,7 +462,9 @@ def cmd_find(
                 console.print("[dim]Nothing selected.[/dim]")
                 return
 
-        found.added = add_candidates(ctx, chosen, force=force, extra_tags=list(tag))
+        found.unread = not read
+        found.added = add_candidates(ctx, chosen, force=force, extra_tags=list(tag),
+                                     read=read)
         for res in found.added:
             if res.entry:
                 link_references(ctx, res.entry)
@@ -441,12 +476,26 @@ def cmd_find(
         return
 
     ok = [r for r in found.added if r.ok]
+    sources = ", ".join(filter(None, [
+        f"{found.from_references} from references" if found.from_references else "",
+        f"{found.from_search} from indexed search" if found.from_search else "",
+        f"{found.from_scouts} from web scouts" if found.from_scouts else "",
+    ])) or "no sources reached"
     console.print(
         f"\n[bold]{len(ok)}[/bold] added of {len(found.added)} attempted "
-        f"(pool of {found.pool_size}: {found.from_references} from references, "
-        f"{found.from_scouts} from web scouts)"
+        f"(pool of {found.pool_size}: {sources})"
     )
-    unverified = [r for r in ok if r.entry and not r.entry.is_verified]
+
+    unread = [r for r in ok if r.entry and r.entry.is_unread]
+    if unread:
+        console.print(
+            f"[cyan]{len(unread)} filed unread[/cyan] — metadata and abstract "
+            f"only, no summaries yet."
+            f"\n[dim]Read the ones worth it: `lit read {unread[0].entry.key}`, "
+            f"or `lit read --all` for every one of them.[/dim]"
+        )
+    unverified = [r for r in ok if r.entry and not r.entry.is_verified
+                  and not r.entry.is_unread]
     if unverified:
         console.print(
             f"[yellow]{len(unverified)} added as UNVERIFIED[/yellow] (no full text): "
@@ -515,6 +564,79 @@ def _prompt_selection(candidates):
             seen.add(id(c))
             out.append(c)
     return out
+
+
+@app.command("read")
+def cmd_read(
+    keys: list[str] = typer.Argument(
+        None, help="Entry keys to read. Omit and use --all for the whole backlog."),
+    all_unread: bool = typer.Option(
+        False, "--all", help="Read every entry that has no summary yet."),
+    limit: int = typer.Option(
+        0, "-n", "--limit", help="With --all, stop after this many (best levels first)."),
+    level: Optional[str] = typer.Option(
+        None, "--level", help="With --all, only entries at this level or better."),
+    tag: Optional[str] = typer.Option(
+        None, "--tag", help="With --all, only entries carrying this tag."),
+):
+    """Read papers in full and write their summaries.
+
+    This is the expensive step, kept separate on purpose: `lit find` files
+    papers from their metadata for almost nothing, and you spend a reader agent
+    only on the ones that earned it.
+    """
+    ctx = _ctx()
+    try:
+        lib = ctx.library
+        wanted: list[Entry] = []
+        missing: list[str] = []
+        if keys:
+            for k in keys:
+                entry = lib.get(k)
+                if entry is None:
+                    missing.append(k)
+                else:
+                    wanted.append(entry)
+        elif all_unread:
+            wanted = [e for e in lib.entries() if e.needs_read]
+            if level:
+                wanted = [e for e in wanted if level_rank(e.level) <= level_rank(level)]
+            if tag:
+                t = tag.strip().lower()
+                wanted = [e for e in wanted if t in [x.lower() for x in e.tags]]
+            # Best-ranked first, so a truncated run reads the papers that matter.
+            wanted.sort(key=lambda e: (level_rank(e.level), -(e.citation_count or 0)))
+            if limit > 0:
+                wanted = wanted[:limit]
+        else:
+            _fail("give one or more entry keys, or --all to read the whole backlog.")
+
+        if missing:
+            _fail(f"no entry with key(s): {', '.join(missing)}")
+        if not wanted:
+            msg = "Nothing to read — every entry already has a summary."
+            if state.json_mode:
+                _emit({"read": [], "message": msg})
+            else:
+                console.print(f"[dim]{msg}[/dim]")
+            return
+
+        results = read_entries(ctx, wanted)
+    finally:
+        ctx.close()
+
+    if state.json_mode:
+        _emit({"read": [r.to_dict() for r in results],
+               "usage": ctx.usage.summary()})
+        return
+
+    ok = [r for r in results if r.ok]
+    console.print(f"\n[bold]{len(ok)}[/bold] of {len(results)} read and summarized")
+    for r in results:
+        if not r.ok:
+            console.print(f"[yellow]{r.status}:[/yellow] {r.message}")
+    if footer := _usage_footer(ctx):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command("reread")
@@ -613,7 +735,7 @@ def cmd_ls(
     level: Optional[str] = typer.Option(None, "--level", help="Minimum level, e.g. A."),
     tag: Optional[str] = typer.Option(None, "--tag", "-t"),
     status: Optional[str] = typer.Option(
-        None, "--status", help="verified | UNVERIFIED"),
+        None, "--status", help="verified | unread | UNVERIFIED"),
     year_from: Optional[int] = typer.Option(None, "--from"),
     year_to: Optional[int] = typer.Option(None, "--to"),
     sort: str = typer.Option("level", "--sort",
@@ -629,7 +751,10 @@ def cmd_ls(
     if tag:
         entries = [e for e in entries if tag.lower() in [t.lower() for t in e.tags]]
     if status:
-        want = STATUS_VERIFIED if status.lower().startswith("v") else "UNVERIFIED"
+        s = status.lower()
+        want = (STATUS_VERIFIED if s.startswith(("v", "r"))
+                else STATUS_UNREAD if s.startswith("un") and "read" in s
+                else "UNVERIFIED")
         entries = [e for e in entries if e.status == want]
     if year_from:
         entries = [e for e in entries if (e.year or 0) >= year_from]
