@@ -860,66 +860,50 @@ def cmd_code(
 @app.command("check")
 def cmd_check(
     keys: list[str] = typer.Argument(
-        None, help="Entry keys to check. Omit to audit the whole library."),
+        ..., help="Entry key(s) to check. One cheap agent call each."),
     fix: bool = typer.Option(
         False, "--fix", help="Apply the corrections that could be confirmed."),
-    limit: int = typer.Option(
-        0, "-n", "--limit", help="Stop after this many (best levels first)."),
-    level: Optional[str] = typer.Option(
-        None, "--level", help="Only entries at this level or better."),
-    tag: Optional[str] = typer.Option(
-        None, "--tag", help="Only entries carrying this tag."),
 ):
-    """Have an agent verify an entry's metadata against the published source.
+    """Have an agent verify one entry's metadata against the published source.
 
-    One cheap agent per entry, always: running this is the statement that the
-    stored record is not trusted, so nothing here decides in code that an entry
-    looks fine and skips the call. The metadata indexes are re-asked first
-    because that is free, and a local consistency check rides along as a hint to
-    the agent — neither of them replaces it.
+    This works an entry at a time, and names it: a key is required. Checking is
+    a per-entry judgement — you look at the record, and at what a source says it
+    should be — not a sweep, so there is no way to point it at a whole library
+    and no filters for choosing a slice of one. `lit browse` is built for working
+    down a list this way, one entry per keypress with `M`.
 
-    Scope is yours to set: give keys, or narrow the library with --level, --tag
-    and -n. `lit browse` checks one entry at a time with `M`.
+    Within an entry, the check is always spent: running this is the statement
+    that the stored record is not trusted, so nothing here decides in code that
+    an entry looks fine and skips the call. The metadata indexes are re-asked
+    first because that is free, and a local consistency check rides along as a
+    hint to the agent — neither of them replaces it.
 
     Reports by default. `--fix` writes, and only ever to bibliographic fields:
     summaries, abstracts and your notes are never touched. Citation counts and
     author lists are never taken from the agent at all — those come from the
     indexes, because a fabricated number cannot be told from a real one.
     """
-    if level and level not in LEVELS:
-        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         lib = ctx.library
         wanted: list[Entry] = []
         missing: list[str] = []
-        if keys:
-            for k in keys:
-                entry = lib.get(k)
-                if entry is None:
-                    missing.append(k)
-                else:
-                    wanted.append(entry)
-        else:
-            wanted = lib.entries()
-            if level:
-                wanted = [e for e in wanted if level_rank(e.level) <= level_rank(level)]
-            if tag:
-                t = tag.strip().lower()
-                wanted = [e for e in wanted if t in [x.lower() for x in e.tags]]
-            wanted.sort(key=lambda e: (level_rank(e.level), -(e.citation_count or 0)))
-            if limit > 0:
-                wanted = wanted[:limit]
+        for k in keys:
+            entry = lib.get(k)
+            if entry is None:
+                missing.append(k)
+            else:
+                wanted.append(entry)
 
         if missing:
             _fail(f"no entry with key(s): {', '.join(missing)}")
-        if not wanted:
-            msg = "Nothing to check — this library has no entries."
-            if state.json_mode:
-                _emit({"checked": [], "message": msg})
-            else:
-                console.print(f"[dim]{msg}[/dim]")
-            return
+
+        # Naming several keys is still per-entry work, but it is several agent
+        # calls, so it is asked for the same way `lit read` asks.
+        # --json means nobody is at the terminal to answer, so it does not prompt.
+        if len(wanted) > 1 and not (state.yes or state.json_mode):
+            if not typer.confirm(f"Check {len(wanted)} entries?"):
+                raise typer.Exit(0)
 
         results = check_entries(ctx, wanted, fix=fix)
     finally:

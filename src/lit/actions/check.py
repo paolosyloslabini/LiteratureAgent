@@ -7,14 +7,17 @@ for a decade, a year that predates the paper's own preprint, an author list
 collapsed to one name. None of that fails a schema, so nothing upstream catches
 it, and `lit refresh` re-fetches the same wrong answer.
 
-Asking for a check is itself the statement that the stored record is not
-trusted, so every entry passed in gets an agent that goes and looks. There is no
-cheap path that skips one: a code-side audit deciding an entry "looks fine"
-would answer the user's doubt with the same code whose output they are doubting.
-What the caller controls is the scope — one key, or `--level` / `--tag` / `-n` —
-not whether the call happens.
+This is per-entry work. A check is a judgement about one record — this venue,
+against what this source says — so `lit check` requires a key and there is no way
+to sweep a library with it. `lit browse` is where a backlog gets worked down, one
+entry per keypress.
 
-Each entry therefore goes through two steps:
+Within an entry, the agent is always spent. Asking for a check is itself the
+statement that the stored record is not trusted, so there is no cheap path that
+skips the call: a code-side audit deciding an entry "looks fine" would answer
+that doubt with the same code whose output is in doubt.
+
+Each entry goes through two steps:
 
 1. **Re-resolve from the indexes.** Free and authoritative, and worth doing
    first: a field the indexes can settle with a better identifier is one the
@@ -212,7 +215,11 @@ def arxiv_year(arxiv_id: str | None) -> int | None:
 
 def check_entries(ctx: Ctx, entries: list[Entry], *,
                   fix: bool = False) -> list[CheckResult]:
-    """Have an agent verify each entry's record, and optionally correct it.
+    """Have an agent verify each named entry's record, and optionally correct it.
+
+    Callers name the entries: `lit check` takes keys and the browser passes the
+    one under the cursor. Nothing in here selects entries on its own, because
+    checking is a per-entry judgement rather than a sweep.
 
     Every entry passed in gets its agent call. There is deliberately no cheap
     path that skips one: asking for a check *is* the statement that the stored
@@ -220,9 +227,7 @@ def check_entries(ctx: Ctx, entries: list[Entry], *,
     would answer that doubt with the same code whose output is in doubt.
 
     `audit()` still runs, but as a hint carried into the prompt — "these fields
-    also look implausible from here" — rather than as a gate in front of it. So
-    the caller controls the bill by choosing what to pass in (`--level`,
-    `--tag`, `-n`, or one key), not by having the audit quietly decline.
+    also look implausible from here" — rather than as a gate in front of it.
     """
     if not entries:
         return []

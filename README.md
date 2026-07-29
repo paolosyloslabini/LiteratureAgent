@@ -75,7 +75,7 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit read` / `reread` | read filed papers and write their summaries |
 | `lit inbox` | adopt PDFs dropped in `pdfs/inbox/` |
 | `lit refresh` | re-fetch citations, references and venues (no LLM) |
-| `lit check` | send an agent to verify an entry's metadata against its source |
+| `lit check <key>` | send an agent to verify one entry's metadata against its source |
 | `lit ls` / `show` / `note` | browse and annotate |
 | `lit delete` (`rm`) | remove entries, their PDFs and cached text |
 | `lit abstract` | print an entry's abstract |
@@ -228,18 +228,21 @@ that disagrees with the arXiv id. `lit check` sends a cheap agent to verify a
 record's venue, year and type against the published source:
 
 ```bash
-lit check <key>               # one entry, report only
-lit check --level A -n 20     # the best 20, report only
-lit check <key> --fix         # apply the corrections it can confirm
-lit --json check <key>        # for scripts and agents
+lit check vaswani2017attention          # report what it finds
+lit check vaswani2017attention --fix    # apply what it can confirm
+lit --json check <key>                  # for scripts and agents
 ```
 
-Every entry you pass in gets its agent call. Asking for a check is the statement
+It works an entry at a time and a key is required — checking is a judgement
+about one record, not a sweep, so there is no way to point it at a whole library.
+`lit browse` is built for working down a list this way, one entry per keypress
+with `M`.
+
+Within an entry the agent is always spent. Asking for a check is the statement
 that the stored record is not trusted, so nothing decides in code that an entry
-looks fine and skips it — you control the bill by choosing the scope. The
-metadata indexes are re-asked first because that is free and authoritative, and
-a local consistency check rides along as a hint to the agent; neither replaces
-it.
+looks fine and skips the call. The metadata indexes are re-asked first because
+that is free and authoritative, and a local consistency check rides along as a
+hint to the agent; neither replaces it.
 
 What comes back is vetted before it is believed. A proposed venue must not
 itself be a publisher or a preprint server, must carry a quoted line of
