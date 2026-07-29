@@ -66,7 +66,7 @@ async def test_filter_cycles_through_the_defined_views(app):
         app.action_cycle_filter()  # -> A* and A
         assert [e.key for e in app.shown] == ["vaswani2017attention"]
 
-        app.action_cycle_filter()  # -> unread
+        app.action_cycle_filter()  # -> not read
         assert [e.key for e in app.shown] == ["doe2010obscure"]
 
         app.action_cycle_filter()  # -> with notes
@@ -74,6 +74,28 @@ async def test_filter_cycles_through_the_defined_views(app):
 
         app.action_cycle_filter()  # wraps back to all
         assert len(app.shown) == 2
+
+
+async def test_the_backlog_filter_is_not_named_after_the_cli_status(app, stocked):
+    """It shows both states `R` will read, so it cannot borrow `unread` for them.
+
+    `lit ls --status unread` means one status; the status column beside the
+    filter says the same. The filter is the wider read backlog, so it says so.
+    """
+    stocked.save_entry(make_entry(key="doe2024unread", status=STATUS_UNREAD,
+                                  one_liner=None, sections=[], references=[]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_reload()
+        app.action_cycle_filter()  # -> A* and A
+        app.action_cycle_filter()  # -> the read backlog
+        name, pred = app.FILTERS[app.filter_i]
+
+        shown = {e.key: app.row_status(e) for e in app.shown}
+        assert shown == {"doe2024unread": "unread", "doe2010obscure": "UNVERIFIED"}
+        assert name != STATUS_UNREAD
+        # And it is exactly the set the `R` key is willing to act on.
+        assert all(pred(e) is e.needs_read for e in stocked.entries())
 
 
 async def test_with_notes_filter_finds_annotated_entries(app, stocked):
@@ -294,7 +316,7 @@ async def test_read_asks_before_spending_a_reader_agent(app, monkeypatch):
     async with app.run_test() as pilot:
         await pilot.pause()
         app.action_cycle_filter()  # -> A* and A
-        app.action_cycle_filter()  # -> unread, so the cursor is on one
+        app.action_cycle_filter()  # -> not read, so the cursor is on one
         await pilot.pause()
 
         app.action_read_entry()
@@ -453,7 +475,7 @@ async def test_open_code_says_so_when_there_is_no_repository(app, monkeypatch):
     async with app.run_test() as pilot:
         await pilot.pause()
         app.action_cycle_filter()
-        app.action_cycle_filter()  # -> unread: the entry with no code link
+        app.action_cycle_filter()  # -> not read: the entry with no code link
         await pilot.pause()
         app.action_open_code()  # must not raise, must not open
 
@@ -499,7 +521,7 @@ async def test_pressing_C_then_confirming_searches_for_the_code(app, stocked,
     async with app.run_test() as pilot:
         await pilot.pause()
         app.action_cycle_filter()
-        app.action_cycle_filter()  # -> unread: the entry with no code link
+        app.action_cycle_filter()  # -> not read: the entry with no code link
         await pilot.pause()
 
         await pilot.press("C")

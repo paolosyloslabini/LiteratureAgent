@@ -134,6 +134,24 @@ def test_import_key_collision_on_different_works_keeps_both(lib, root, tmp_path)
     assert len(lib) == 2
 
 
+def test_import_keeps_a_hostile_key_inside_the_library(lib, root, tmp_path):
+    import zipfile
+
+    evil = tmp_path / "evil.litlib"
+    entry = make_entry(key="../../../pwned")
+    with zipfile.ZipFile(evil, "w") as z:
+        z.writestr("entries/evil.md", entryfile.dumps(entry))
+        z.writestr("pdfs/evil.pdf", b"%PDF-1.4 fake")
+
+    before = {p for p in tmp_path.rglob("*") if not p.is_relative_to(lib.path)}
+    bundle.import_bundle(evil, root=root, into=lib)
+    after = {p for p in tmp_path.rglob("*") if not p.is_relative_to(lib.path)}
+
+    assert after == before  # nothing written outside the library
+    assert len(lib) == 1
+    assert not any(c in lib.keys()[0] for c in ("/", "\\", ".."))
+
+
 def test_import_rejects_unknown_strategy(lib, root, tmp_path):
     lib.save_entry(make_entry())
     out = bundle.export_library(lib, tmp_path / "b.litlib")

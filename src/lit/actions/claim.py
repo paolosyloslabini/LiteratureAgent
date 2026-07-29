@@ -305,7 +305,7 @@ def _candidate_refs(analysis: dict, refs: list[Reference]) -> list[Reference]:
         try:
             i = int(a.get("index"))
             conf = float(a.get("confidence", 0.5))
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             continue
         if 0 <= i < len(refs):
             scored.append((conf, refs[i]))

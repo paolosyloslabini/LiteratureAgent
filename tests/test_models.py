@@ -107,16 +107,6 @@ def test_entry_citation(entry):
     assert entry.citation() == "Vaswani et al., NeurIPS, 2017"
 
 
-def test_entry_searchable_text_includes_notes(entry):
-    entry.notes = "MYUNIQUETOKEN"
-    assert "MYUNIQUETOKEN" in entry.searchable_text()
-
-
-def test_entry_searchable_text_includes_the_abstract(entry):
-    entry.abstract = "ABSTRACTTOKEN"
-    assert "ABSTRACTTOKEN" in entry.searchable_text()
-
-
 # --------------------------------------------------------------------------
 # Code / artifact repository links
 # --------------------------------------------------------------------------

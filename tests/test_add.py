@@ -11,9 +11,10 @@ import pytest
 from factories import make_meta
 from rich.console import Console
 
-from lit.actions.add import add_paper, reread
+from lit.actions.add import AddResult, add_paper, reread
 from lit.prompts import MAX_KEY_FINDINGS, MAX_SECTIONS, SECTION_WORDS_CEILING
 from lit.actions.context import Ctx, parse_target
+from lit.actions.inbox import process_inbox
 from lit.fetch.fulltext import FullText
 from lit.llm import LLMError
 from lit.models import (
@@ -403,6 +404,57 @@ def test_reading_failure_keeps_the_entry_unverified(monkeypatch, ctx):
     assert ctx.library.get(res.entry.key).status == STATUS_UNVERIFIED
 
 
+# --------------------------------------------------------------------------
+# A re-read that fails costs nothing but the attempt
+#
+# Both failure branches store a freshly built entry, which carries no summaries
+# at all. Over an entry that had already been read that is silent data loss:
+# exit code 0, and a verified card comes back blank.
+# --------------------------------------------------------------------------
+
+def test_a_failed_fetch_does_not_destroy_the_reading_already_on_record(
+        monkeypatch, ctx):
+    """`lit reread` with the PDF route unreachable used to blank the entry."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+    found = ctx.library.get("vaswani2017attention")
+    found.code_url = "https://github.com/found/here"
+    found.code_source = CODE_FROM_WEB
+    ctx.library.save_entry(found)
+
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=None)
+    res = reread(ctx, "vaswani2017attention")
+
+    stored = ctx.library.get("vaswani2017attention")
+    assert stored.status == STATUS_VERIFIED
+    assert stored.one_liner == "Introduces the Transformer."
+    assert stored.sections[0].name == "Introduction"
+    assert stored.key_findings == ["28.4 BLEU on WMT 2014"]
+    assert stored.tags == ["transformers", "self-attention"]
+    assert stored.code_url == "https://github.com/found/here"
+    # …and the report says the fetch failed without claiming the entry fell back.
+    assert "UNVERIFIED" not in res.message
+    assert any("full text could not be retrieved" in w for w in res.warnings)
+
+
+def test_a_failed_reading_step_does_not_destroy_the_one_already_on_record(
+        monkeypatch, ctx):
+    """The text arrived, the reader fell over; the earlier reading still stands."""
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("x" * 9000, "arxiv"),
+         llm=StubLLM(fail=True))
+    res = reread(ctx, "vaswani2017attention")
+
+    assert res.status == "error"
+    stored = ctx.library.get("vaswani2017attention")
+    assert stored.status == STATUS_VERIFIED
+    assert stored.one_liner == "Introduces the Transformer."
+    assert stored.sections[0].name == "Introduction"
+    assert stored.key_findings == ["28.4 BLEU on WMT 2014"]
+
+
 def test_references_come_from_metadata_not_the_model(monkeypatch, ctx):
     from lit.models import Reference
 
@@ -580,6 +632,71 @@ def test_an_unread_entry_elsewhere_is_not_reused(monkeypatch, ctx, cfg):
     assert res.entry.status == STATUS_VERIFIED
 
 
+def test_a_first_read_takes_the_reading_a_sibling_library_already_has(
+        monkeypatch, ctx, cfg):
+    """`lit read <key>` on an unread entry: the free copy, not a fresh agent."""
+    from lit.actions.add import read_entries
+
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    first = add_paper(ctx, "t")            # read once, into `testlib`
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    filed = add_paper(moved, "t", read=False)
+    assert filed.entry.status == STATUS_UNREAD
+
+    [res] = read_entries(moved, [filed.entry])
+
+    assert llm2.calls == 0                 # the reader was not bought twice
+    assert res.ok
+    assert res.entry.key == filed.entry.key
+    assert res.entry.status == STATUS_VERIFIED
+    assert res.entry.one_liner == first.entry.one_liner
+    assert "reused" in res.message and "testlib" in res.message
+    assert len(other) == 1
+
+
+def test_a_reread_of_an_entry_already_read_still_buys_a_fresh_one(
+        monkeypatch, ctx, cfg):
+    """`lit reread` on an entry that has a reading means: read it again."""
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    adopted = add_paper(moved, "t")
+    assert llm2.calls == 0 and adopted.entry.status == STATUS_VERIFIED
+
+    res = reread(moved, adopted.entry.key)
+
+    assert llm2.calls == 1
+    assert res.ok and res.entry.status == STATUS_VERIFIED
+
+
+def test_a_supplied_pdf_is_read_instead_of_taking_a_copy(
+        monkeypatch, ctx, cfg, tmp_path):
+    """`--pdf` and `lit inbox` point at a file and mean: read *that*."""
+    other = _second_library(cfg)
+    wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
+    add_paper(ctx, "t")
+
+    moved = Ctx(cfg=cfg, library=other, console=Console(quiet=True), json_mode=True)
+    llm2 = wire(monkeypatch, moved, meta=make_meta(),
+                fulltext=FullText("t" * 9000, "arxiv"))
+    filed = add_paper(moved, "t", read=False)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+
+    res = reread(moved, filed.entry.key, local_pdf=pdf)
+
+    assert llm2.calls == 1
+    assert res.ok and res.entry.status == STATUS_VERIFIED
+
+
 def test_a_different_paper_elsewhere_is_not_mistaken_for_this_one(monkeypatch, ctx, cfg):
     other = _second_library(cfg)
     wire(monkeypatch, ctx, meta=make_meta(), fulltext=FullText("t" * 9000, "arxiv"))
@@ -592,3 +709,43 @@ def test_a_different_paper_elsewhere_is_not_mistaken_for_this_one(monkeypatch, c
                 fulltext=FullText("t" * 9000, "arxiv"))
     add_paper(moved, "other")
     assert llm2.calls == 1
+
+
+# --------------------------------------------------------------------------
+# The inbox clears its own copies — and only its own
+# --------------------------------------------------------------------------
+
+def wire_inbox(monkeypatch):
+    """Identification and the add itself are not what these tests are about."""
+    monkeypatch.setattr("lit.actions.inbox.pdf_to_text", lambda *a, **k:
+                        "arXiv:1706.03762v5 [cs.CL]\n\nAttention Is All You Need\n")
+    monkeypatch.setattr("lit.actions.inbox.add_paper", lambda *a, **k:
+                        AddResult(status="added", message="vaswani2017attention"))
+
+
+def drop_pdf(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"%PDF-1.4\n")
+    return path
+
+
+def test_a_processed_pdf_leaves_the_inbox(monkeypatch, ctx):
+    wire_inbox(monkeypatch)
+    dropped = drop_pdf(ctx.library.inbox_dir / "paper.pdf")
+
+    res = process_inbox(ctx)
+
+    assert res.items[0].result.ok
+    assert not dropped.exists()
+
+
+def test_a_file_outside_the_inbox_is_left_where_it_is(monkeypatch, ctx, tmp_path):
+    """`lit inbox --add ~/Downloads/paper.pdf` reads your copy, it does not
+    consume it: the file is yours, and the inbox never held it."""
+    wire_inbox(monkeypatch)
+    mine = drop_pdf(tmp_path / "Downloads" / "paper.pdf")
+
+    res = process_inbox(ctx, only=[mine])
+
+    assert res.items[0].result.ok
+    assert mine.exists()

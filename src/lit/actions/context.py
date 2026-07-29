@@ -13,11 +13,6 @@ from ..library import Library
 from ..llm import ClaudeCLI, Usage
 from ..models import normalize_arxiv, normalize_doi
 
-# How much paper text one reading prompt may carry when the config does not say.
-# The live value is `llm.read_chars`; this is only the floor under a config that
-# predates the setting.
-DEFAULT_READ_CHARS = 400_000
-
 
 @dataclass
 class Ctx:
@@ -46,7 +41,6 @@ class Ctx:
                 # picks up is the library's, not the user's current repo.
                 cwd=str(self.library.path),
                 usage=self.usage,
-                verbose=self.verbose,
             )
         return self._llm
 
@@ -63,7 +57,7 @@ class Ctx:
         alternative — a module constant per action — is how `ask` and `claim`
         came to ignore the configured budget entirely.
         """
-        return getattr(self.cfg.llm, "read_chars", DEFAULT_READ_CHARS)
+        return self.cfg.llm.read_chars
 
     def log(self, message: str) -> None:
         """Progress output. Suppressed in --json mode so stdout stays parseable."""

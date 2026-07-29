@@ -39,9 +39,6 @@ class LLMError(RuntimeError):
 class LLMResult:
     text: str
     cost_usd: float = 0.0
-    duration_ms: int = 0
-    num_turns: int = 0
-    session_id: str = ""
     model: str = ""
     role: str = ""
 
@@ -74,11 +71,10 @@ class ClaudeCLI:
     """Thin wrapper around `claude -p --output-format json`."""
 
     def __init__(self, cfg: LLMConfig | None = None, *, cwd: str | None = None,
-                 usage: Usage | None = None, verbose: bool = False):
+                 usage: Usage | None = None):
         self.cfg = cfg or LLMConfig()
         self.cwd = cwd
         self.usage = usage or Usage()
-        self.verbose = verbose
         self._exe = shutil.which("claude")
         # Set once the installed CLI turns out not to know `--effort`, so an
         # older Claude Code degrades to its own default instead of failing every
@@ -188,9 +184,6 @@ class ClaudeCLI:
         result = LLMResult(
             text=str(payload.get("result") or ""),
             cost_usd=float(payload.get("total_cost_usd") or 0.0),
-            duration_ms=int(payload.get("duration_ms") or 0),
-            num_turns=int(payload.get("num_turns") or 0),
-            session_id=str(payload.get("session_id") or ""),
             model=chosen,
             role=role or "",
         )

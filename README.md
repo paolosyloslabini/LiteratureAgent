@@ -95,8 +95,10 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit browse` | optional interactive browser |
 | `lit skill install` | install the Claude Code skill |
 
-Every command takes `--json`, so scripts and agents can use all of it.
-`-L <library>` targets a specific library; `-v` shows progress detail.
+Every command takes `--json`, so scripts and agents can use all of it. It is a
+global flag, so it goes *before* the subcommand: `lit --json ls`. Same for
+`-L <library>`, which targets a specific library, and `-v`, which shows
+progress detail.
 
 ## How it works
 
@@ -144,7 +146,7 @@ never reached, and it is searchable like the rest of the entry:
 
 ```bash
 lit abstract vaswani2017attention        # plain text, pipeable
-lit show vaswani2017attention --json | jq -r .abstract
+lit --json show vaswani2017attention | jq -r .abstract
 ```
 
 Papers with code get a **`code_url`** — GitHub, GitLab, Hugging Face, Zenodo,
@@ -421,7 +423,8 @@ max_read_pages = 10          # pages sampled from such a document (0 = no limit)
 ```
 
 Override per command with `--model <alias>`, `--effort <level>` and `--workers N`
-(`-j`), or per role with `LIT_MODEL_READER=opus` / `LIT_EFFORT_READER=high`.
+(`-j`) — global flags too, so before the subcommand — or per role with
+`LIT_MODEL_READER=opus` / `LIT_EFFORT_READER=high`.
 `--workers` sets how many agents run at once; `lit find --parallel` is a
 different switch, deciding whether the scout agents run at all.
 
