@@ -184,25 +184,45 @@ def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
     return "\n".join(parts)
 
 
-def filter_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
-    """Score a pool of candidate papers for relevance before we spend reads on them.
+def rank_candidates_prompt(*, query: str, scope: str, candidates: list) -> str:
+    """Score the whole candidate pool for relevance to the query.
 
-    Used on candidates mined from the reference lists of papers already in the
-    library: that pool is large and only loosely related to the query, so it
-    needs a cheap filter before the expensive per-paper read.
+    Every candidate is scored by the same call regardless of where it came
+    from, so a paper mined from a reference list and a paper proposed by a web
+    scout compete on equal terms.
+
+    Only *relevance* is asked for. Importance is computed in code from venue
+    rank and citation velocity (see `Candidate.importance`) — those are real
+    numbers we already hold by this point, and asking a model to guess at them
+    would only add noise to figures we can measure.
     """
-    listed = "\n".join(
-        f"  [{i}] {c.title}"
-        + (f" ({c.year})" if c.year else "")
-        + (f" — cited by {len(c.angles)} of your papers" if c.angles else "")
-        for i, c in enumerate(candidates)
-    )
+    lines = []
+    for i, c in enumerate(candidates):
+        head = f"  [{i}] {c.title}"
+        if c.year:
+            head += f" ({c.year})"
+        if c.venue:
+            head += f" — {c.venue}"
+        if c.citation_count is not None:
+            head += f" — {c.citation_count} citations"
+        lines.append(head)
+        marks = []
+        if c.angles:
+            marks.append(f"proposed by {len(c.angles)} independent search angle(s)")
+        if c.cocitations:
+            marks.append(f"cited by {c.cocitations} paper(s) already in this library")
+        if marks:
+            lines.append(f"      {' · '.join(marks)}")
+        if c.why:
+            lines.append(f"      note: {c.why}")
+    listed = "\n".join(lines)
+
     schema = {
-        "keep": [
+        "scores": [
             {
                 "index": "number — the [i] index below",
-                "relevance": "number 0-1 — how well this fits the query and scope",
-                "why": "string — one short sentence",
+                "relevance": "number 0-1 — how well this answers the query",
+                "why": "string — one short sentence on what it contributes",
             }
         ]
     }
@@ -210,14 +230,21 @@ def filter_candidates_prompt(*, query: str, scope: str, candidates: list) -> str
         f"Query: {query!r}",
         f"Library scope: {scope!r}" if scope else "",
         "",
-        "Below are candidate papers harvested from the reference lists of papers "
-        "already in this library. Most will be tangential. Decide which are "
-        "genuinely worth adding for the query above.",
+        "Below are candidate papers gathered for that query. Score how well each "
+        "one actually answers it. Score every candidate — do not omit any, and do "
+        "not re-order them.",
         "",
-        "Judge from the titles: keep work that plausibly addresses the query, drop "
-        "work that merely shares vocabulary or is background material of a "
-        "different area. Be selective — it is better to keep 5 good ones than 20 "
-        "vague ones. Return an empty list if none fit.",
+        "Calibrate like this:",
+        "  1.0  directly addresses the query — a reader with this question wants it",
+        "  0.7  solidly on topic: same problem, different method or setting",
+        "  0.5  same research area, but answers a different question",
+        "  0.2  background or prerequisite material from a neighbouring area",
+        "  0.0  merely shares vocabulary with the query",
+        "",
+        "Judge relevance only. Do not mark a paper down for being old, obscure or "
+        "unfamiliar, and do not mark one up for being famous — how important a "
+        "paper is has already been measured separately. A landmark paper that "
+        "does not answer this query is a low-relevance paper.",
         "",
         listed,
         "",

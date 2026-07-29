@@ -463,6 +463,9 @@ def _print_candidates(candidates, found) -> None:
     t.add_column("#", justify="right", no_wrap=True)
     t.add_column("title", ratio=3)
     t.add_column("yr", justify="right", no_wrap=True)
+    t.add_column("cites", justify="right", no_wrap=True)
+    t.add_column("match", justify="right", no_wrap=True)
+    t.add_column("imp", justify="right", no_wrap=True)
     t.add_column("src", no_wrap=True)
     t.add_column("why", ratio=2)
     for i, c in enumerate(candidates, 1):
@@ -471,7 +474,13 @@ def _print_candidates(candidates, found) -> None:
             src += f" ×{c.cocitations}"
         elif len(c.angles) > 1:
             src += f" ×{len(c.angles)}"
-        t.add_row(str(i), c.title, str(c.year or "—"), src, c.why)
+        t.add_row(
+            str(i), c.title, str(c.year or "—"),
+            f"{c.citation_count:,}" if c.citation_count is not None else "—",
+            "—" if c.relevance is None else f"{c.relevance:.2f}",
+            f"{c.importance:.2f}",
+            src, c.why,
+        )
     console.print(t)
 
 
