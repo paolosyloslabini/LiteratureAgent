@@ -712,7 +712,11 @@ def cmd_refresh(
     ctx = _ctx()
     try:
         # A variadic Argument with no value arrives as None, not [].
-        results = refresh_entries(ctx, list(keys or []) or None, relevel=not no_relevel)
+        wanted = list(keys or [])
+        missing = [k for k in wanted if ctx.library.get(k) is None]
+        if missing:
+            _fail(f"no entry with key(s): {', '.join(missing)}")
+        results = refresh_entries(ctx, wanted or None, relevel=not no_relevel)
     finally:
         ctx.close()
 
@@ -980,7 +984,11 @@ def cmd_note(
         tmp = lib.path / f".note-{key}.md"
         tmp.write_text(entry.notes, encoding="utf-8")
         try:
-            subprocess.call([editor, str(tmp)])
+            try:
+                subprocess.call([editor, str(tmp)])
+            except OSError as exc:
+                _fail(f"could not start editor {editor!r}: {exc}. Set $EDITOR, "
+                      f'or pass the note text: lit note {key} "..."')
             new = tmp.read_text(encoding="utf-8").strip()
         finally:
             tmp.unlink(missing_ok=True)

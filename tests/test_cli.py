@@ -187,6 +187,18 @@ def test_note_replace(stocked):
     assert js(run("--json", "show", "vaswani2017attention"))["notes"] == "second"
 
 
+def test_note_without_an_editor_fails_cleanly(stocked, monkeypatch):
+    """A missing editor binary is a message, not an OSError traceback."""
+    def boom(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'nano'")
+
+    monkeypatch.setattr("lit.cli.subprocess.call", boom)
+    r = run("--json", "note", "vaswani2017attention")
+    assert r.exit_code != 0
+    assert not isinstance(r.exception, OSError)
+    assert "EDITOR" in js(r)["error"]
+
+
 def test_notes_survive_reindex(stocked):
     run("note", "vaswani2017attention", "durable")
     run("reindex", "--rebuild")
@@ -371,6 +383,13 @@ def test_refresh_specific_key(stocked, monkeypatch):
     monkeypatch.setattr("lit.actions.refresh.resolve_metadata", lambda *a, **k: None)
     data = js(run("--json", "refresh", "vaswani2017attention"))
     assert [r["key"] for r in data["refreshed"]] == ["vaswani2017attention"]
+
+
+def test_refresh_unknown_key_fails(stocked):
+    """A typo must not look like a completed refresh."""
+    r = run("--json", "refresh", "nosuchkey")
+    assert r.exit_code != 0
+    assert "nosuchkey" in js(r)["error"]
 
 
 # --------------------------------------------------------------------------
