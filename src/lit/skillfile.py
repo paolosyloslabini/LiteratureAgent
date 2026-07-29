@@ -1,0 +1,165 @@
+"""The Claude Code skill, and its installer.
+
+The skill text lives here as a string so `lit skill install` works from an
+installed wheel with no data files to locate, and so `lit skill show` can always
+print exactly what would be installed.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+SKILL_NAME = "literature"
+
+SKILL_BODY = """---
+name: literature
+description: >-
+  Search, cite and query the user's research libraries built with the `lit` CLI
+  (literature-agent). Use whenever the user asks about their library or
+  bibliography, asks you to find/add papers, asks a research question that
+  should be answered from real papers with citations, asks for a BibTeX entry or
+  a source for a claim, or is writing a paper and needs references. Triggers on:
+  "my library", "my bibliography", "find papers on", "add this paper", "what do
+  my papers say about", "cite this", "who first showed", "source for the claim
+  that", "trace this claim".
+---
+
+# Literature libraries (`lit`)
+
+The user keeps curated research libraries on disk. Each library has a **scope**
+(a topic) and contains entries: real published papers that an agent has read in
+full, with summaries, tags, a quality level, a BibTeX entry, and the paper's own
+reference list.
+
+Prefer these commands over generic web search when the question is about
+literature the user already collects. The library is vetted; the open web is not.
+
+## Orientation — run these first
+
+```bash
+lit libs                 # which libraries exist, and which is the default
+lit info                 # scope, entry count, levels, top tags of the current one
+lit info --json          # same, machine-readable
+```
+
+Use `-L <name>` on any command to target a specific library. **Every command
+below takes `--json`** — always pass it when you are going to parse the output.
+
+## Reading the library
+
+```bash
+lit ls --level A --tag benchmarks --json      # filter by level, tag, year, status
+lit show <key> --json                          # one entry, with sections + references
+lit search "causal discovery in agents" --json # ranked entries + a short answer
+```
+
+`lit search` works from stored summaries — it is fast and cheap. Use it to find
+out **which** papers are relevant.
+
+## Answering a question properly
+
+```bash
+lit ask "What are current agent capabilities in causal discovery?" --json
+lit ask "..." --read 8 --expand 3 --json
+```
+
+`lit ask` opens the actual PDFs and reads them in parallel, then answers with
+**exact quotes** and a bibliography. Use it, not `lit search`, when the user
+wants a real answer rather than a reading list. `--expand N` also pulls in up to
+N works cited by those papers that aren't in the library yet.
+
+It costs real time and tokens (one agent per paper), so pick `--read` sensibly:
+3-5 for a focused question, 8+ for a survey.
+
+## Adding papers
+
+```bash
+lit add "Attention Is All You Need"          # by title
+lit add 10.1145/3292500.3330701              # by DOI
+lit add arxiv:1706.03762                     # by arXiv id
+lit add "Some Paywalled Paper" --pdf ~/Downloads/paper.pdf
+lit find "LLM benchmarks for scientific discovery" -n 10 --json
+```
+
+- `add` fetches the paper, reads the **whole text**, and writes the summaries.
+- `find` runs several scout agents in parallel over different angles, mines the
+  reference lists of papers already in the library, de-duplicates everything,
+  then reads each survivor. Use `--dry-run` to see candidates without adding.
+- Entries below the library's quality bar are rejected; `--force` overrides.
+- If the full text can't be reached, the entry is stored **UNVERIFIED** with
+  blank summaries. Never present an UNVERIFIED entry's content as if it were
+  summarized — there is nothing there. Tell the user to drop the PDF in
+  `pdfs/inbox/` and run `lit inbox`.
+
+## Keeping a library current
+
+```bash
+lit refresh --json          # re-fetch citation counts, references, venues
+lit refresh <key> --json    # just one entry
+```
+
+Network-only and free — no LLM, nothing re-read. Run it before quoting citation
+counts, or when a preprint in the library may have been published since. It
+never touches summaries or notes. To re-read a paper itself, use `lit reread`.
+
+## Citations and claims
+
+```bash
+lit cite vaswani2017attention                    # BibTeX to stdout
+lit cite --level A --format markdown             # a reading list
+lit cite --format bibtex -o refs.bib             # a .bib file for a paper
+lit claim "transformers scale better than LSTMs" --json
+```
+
+`lit claim` traces a claim backwards through citations to the paper that
+originates it, and reports the chain: `Paper A (2020) -> B (2015) -> C (2008,
+original)`. Use it whenever the user asks "who first showed X" or needs a
+primary source rather than a convenient recent citation.
+
+## Sharing
+
+```bash
+lit export -o mylib.litlib          # a bundle to send someone
+lit import theirs.litlib --into my-library
+```
+
+## Rules that matter
+
+1. **Never write to `## Notes`.** That section of every entry file is the
+   user's. Only `lit note <key> "..."` touches it, and only when the user asks
+   you to record something. Do not edit entry files directly with Edit/Write —
+   use the CLI, which regenerates them safely.
+2. **Never invent a citation.** If `lit` doesn't have it, say so and offer to
+   `lit add` it. Every key you cite must come from a command's output.
+3. **Quote from `lit ask`, not from memory.** Its quotes are copied out of the
+   real text; anything you recall about a paper is not.
+4. **Check `status`.** `UNVERIFIED` means nobody has read it.
+5. Long-running commands (`find`, `ask`, `claim`) run several agents at once.
+   Run them in the background if the user is waiting, and tell them what's going.
+
+## Setup, if `lit` isn't there
+
+```bash
+lit libs || pipx install literature-agent    # or: uv tool install literature-agent
+lit new <name> --scope "<topic>"             # create the user's first library
+```
+"""
+
+
+def skill_source() -> Path:
+    """Where the skill would be installed by default."""
+    return Path.home() / ".claude" / "skills" / SKILL_NAME / "SKILL.md"
+
+
+def install_skill(*, project: bool = False, root: Path | None = None) -> Path:
+    """Write SKILL.md into the user's (or project's) Claude Code skills dir."""
+    if root is not None:
+        base = Path(root)
+    elif project:
+        base = Path.cwd() / ".claude" / "skills"
+    else:
+        base = Path.home() / ".claude" / "skills"
+    dest = base / SKILL_NAME / "SKILL.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(SKILL_BODY, encoding="utf-8")
+    return dest
