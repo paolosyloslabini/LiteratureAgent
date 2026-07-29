@@ -630,6 +630,53 @@ def test_read_all_picks_up_entries_with_no_summary(stocked, monkeypatch):
     assert set(asked["keys"]) == {"new2024unread", "doe2010obscure"}
 
 
+def test_read_all_still_filters_on_a_valid_level(stocked, monkeypatch):
+    stocked.save_entry(make_entry(
+        key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
+        one_liner=None, sections=[], status="unread",
+    ))
+    asked = {}
+    monkeypatch.setattr("lit.cli.read_entries",
+                        lambda ctx, entries: (asked.update(
+                            keys=[e.key for e in entries]), [])[1])
+    r = run("--json", "read", "--all", "--level", "A")
+    assert r.exit_code == 0
+    # The A* entry, not the C one.
+    assert asked["keys"] == ["new2024unread"]
+
+
+# A level the ranking does not know ranked worse than every real one, so
+# `level_rank(e.level) <= level_rank(level)` was true for the whole library and
+# the filter matched everything. On `read --all` that read the entire backlog.
+_LEVEL_ARGV = [
+    ("ls", "--level", "a"),
+    ("cite", "--level", "a"),
+    ("read", "--all", "--level", "a"),
+    ("code", "--all", "--level", "a"),
+    ("search", "attention", "--level", "a"),
+    ("ask", "what is attention?", "--level", "a"),
+]
+
+
+@pytest.mark.parametrize("argv", _LEVEL_ARGV, ids=lambda a: a[0])
+def test_an_unknown_level_is_rejected_before_anything_expensive(
+        stocked, monkeypatch, argv):
+    spent = []
+    for name in ("read_entries", "find_code", "search_action", "ask_action"):
+        monkeypatch.setattr(f"lit.cli.{name}",
+                            lambda *a, _n=name, **k: (spent.append(_n), [])[1])
+    r = run("--json", *argv)
+    assert r.exit_code != 0
+    assert "--level must be one of" in js(r)["error"]
+    assert spent == []
+
+
+def test_config_set_rejects_an_unknown_min_level(stocked):
+    r = run("--json", "config", "set", "--library", "min_level", "a")
+    assert r.exit_code != 0
+    assert js(run("--json", "info"))["min_level"] == "C"
+
+
 def test_read_all_says_so_when_there_is_nothing_to_do(isolated):
     run("new", "mylib", "--scope", "s")
     lib = Library.open(isolated / "mylib")
