@@ -6,7 +6,7 @@ import json
 
 import pytest
 import typer
-from factories import make_entry
+from factories import make_entry, make_meta
 from typer.testing import CliRunner
 
 from lit.actions.discover import Candidate, FindResult, SearchPlan
@@ -757,6 +757,89 @@ def test_read_all_says_so_when_there_is_nothing_to_do(isolated):
     r = run("--json", "read", "--all")
     assert r.exit_code == 0
     assert js(r)["read"] == []
+
+
+# --------------------------------------------------------------------------
+# Expensive commands say what they are doing, and ask before a batch
+# --------------------------------------------------------------------------
+
+def _staged_add(monkeypatch, title="A Brand New Paper"):
+    """Answer the metadata lookup, the download and the reader from memory."""
+    from lit.actions import add as add_action
+    from lit.fetch.fulltext import FullText
+
+    monkeypatch.setattr(add_action, "resolve_metadata",
+                        lambda *a, **k: make_meta(title=title, arxiv_id="2401.09999"))
+    monkeypatch.setattr(add_action, "fetch_fulltext",
+                        lambda *a, **k: FullText("FULL PAPER TEXT " * 100, "arxiv"))
+    _bill(monkeypatch, reply={
+        "one_liner": "A new paper.",
+        "sections": [{"name": "Introduction", "summary": "It begins."}],
+    })
+
+
+def test_add_says_what_it_is_doing_without_v(stocked, monkeypatch):
+    """Minutes of silence are indistinguishable from a hang, so -v is too late."""
+    _staged_add(monkeypatch)
+    out = run("add", "A Brand New Paper").stdout
+    assert "resolving metadata" in out
+    assert "fetching full text" in out
+    assert "chars via arxiv" in out
+
+
+def test_add_milestones_stay_out_of_json(stocked, monkeypatch):
+    """--json is parsed by scripts; progress on stdout would break them."""
+    _staged_add(monkeypatch)
+    r = run("--json", "add", "A Brand New Paper")
+    assert js(r)["status"] == "added"
+    assert "resolving metadata" not in r.stdout
+    assert "fetching full text" not in r.stdout
+
+
+@pytest.fixture
+def two_to_read(stocked, monkeypatch):
+    """Two entries needing a reader agent, with `read_entries` stubbed out."""
+    stocked.save_entry(make_entry(
+        key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
+        one_liner=None, sections=[], status="unread",
+    ))
+    asked = {}
+    monkeypatch.setattr("lit.cli.read_entries",
+                        lambda ctx, entries: (asked.update(
+                            keys=[e.key for e in entries]), [])[1])
+    return asked
+
+
+def test_read_all_asks_before_buying_a_batch(two_to_read):
+    """Declining leaves the backlog unread, and nothing was spent."""
+    r = runner.invoke(app, ["read", "--all"], input="n\n")
+    assert r.exit_code == 0
+    assert "Read 2 papers in full?" in r.stdout
+    assert "keys" not in two_to_read
+
+
+def test_read_all_reads_when_confirmed(two_to_read):
+    r = runner.invoke(app, ["read", "--all"], input="y\n")
+    assert r.exit_code == 0
+    assert len(two_to_read["keys"]) == 2
+
+
+def test_read_all_does_not_ask_under_yes(two_to_read):
+    r = runner.invoke(app, ["-y", "read", "--all"])  # no answer available
+    assert r.exit_code == 0
+    assert len(two_to_read["keys"]) == 2
+
+
+def test_read_all_does_not_ask_in_json(two_to_read):
+    r = run("--json", "read", "--all")
+    assert r.exit_code == 0
+    assert len(two_to_read["keys"]) == 2
+
+
+def test_read_of_a_single_paper_does_not_ask(two_to_read):
+    r = runner.invoke(app, ["read", "doe2010obscure"])  # no answer available
+    assert r.exit_code == 0
+    assert two_to_read["keys"] == ["doe2010obscure"]
 
 
 def test_ls_can_filter_for_unread(stocked):

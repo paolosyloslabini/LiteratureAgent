@@ -396,7 +396,7 @@ def cmd_add(
     ctx = _ctx()
     try:
         res = add_paper(ctx, query, local_pdf=pdf, force=force, refresh=refresh,
-                        extra_tags=list(tag), read=not no_read)
+                        extra_tags=list(tag), read=not no_read, progress=True)
         if res.entry:
             link_references(ctx, res.entry)
     finally:
@@ -672,6 +672,13 @@ def cmd_read(
             else:
                 console.print(f"[dim]{msg}[/dim]")
             return
+
+        # One reader agent per paper, and `--all` has no cap of its own, so a
+        # batch is the most expensive thing this tool can be asked to do.
+        # --json means nobody is at the terminal to answer, so it does not prompt.
+        if len(wanted) > 1 and not (state.yes or state.json_mode):
+            if not typer.confirm(f"Read {len(wanted)} papers in full?"):
+                raise typer.Exit(0)
 
         results = read_entries(ctx, wanted)
     finally:

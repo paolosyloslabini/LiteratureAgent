@@ -84,6 +84,7 @@ def add_paper(
     target: Target | None = None,
     read: bool = True,
     max_chars: int | None = None,
+    progress: bool = False,
 ) -> AddResult:
     """Resolve, vet, read and store one paper.
 
@@ -92,10 +93,17 @@ def add_paper(
     `unread`. No full text is fetched and no reader agent runs, so the whole
     thing costs nothing but a few API calls. `lit read <key>` fills in the
     summaries later, for the entries that turn out to be worth it.
+
+    `progress=True` puts the milestones on stdout instead of behind `-v`. That
+    is what `lit add` wants: one paper, a metadata lookup, a download and a
+    reader agent, and minutes of silence that look exactly like a hang. The
+    batch callers (`find`, `read`, `inbox`) leave it off — they run many of
+    these at once and already print a line per paper of their own.
     """
     lib = ctx.library
     warnings: list[str] = []
     target = target or parse_target(query)
+    say = ctx.log if progress else ctx.vlog
 
     # ---- 1. metadata -----------------------------------------------------
     # Remembered so a failure to resolve can say *why*: every index being
@@ -104,7 +112,7 @@ def add_paper(
     # fixing an input that was correct all along.
     unavailable_before = ctx.http.unavailable_count
     if meta is None:
-        ctx.vlog(f"resolving metadata for {target.describe()!r}")
+        say(f"resolving metadata for {target.describe()!r}")
         meta = resolve_metadata(
             ctx.http,
             doi=target.doi,
@@ -209,7 +217,7 @@ def add_paper(
                 entry=saved, verdict=verdict, meta=meta, warnings=warnings,
             )
 
-    ctx.vlog(f"[{key}] fetching full text")
+    say(f"[{key}] fetching full text")
     ft = fetch_fulltext(
         ctx.http, meta,
         key=key,
@@ -265,7 +273,7 @@ def add_paper(
             "The summary covers that sample, not the whole work. Raise the "
             "budget with `lit config set fetch.max_read_pages <n>`."
         )
-    ctx.vlog(f"[{key}] reading {len(text):,} chars via {ft.source}")
+    say(f"[{key}] reading {len(text):,} chars via {ft.source}")
 
     try:
         data = ctx.llm.json(
