@@ -1114,8 +1114,10 @@ def mine_references(entries, known_slugs: set[str],
         c = protos[k]
         if c.dedup_key in known_ids or slugify(c.title, 120) in known_slugs:
             continue
+        # `cocitations` is the whole signal here — the ranking card renders it
+        # in words already. Writing the same sentence into `why` would spend
+        # tokens saying it twice *and* take the slot the abstract goes in.
         c.cocitations = n
-        c.why = f"cited by {n} paper(s) already in this library"
         out.append(c)
 
     out.sort(key=lambda c: (-c.cocitations, -(c.year or 0)))
