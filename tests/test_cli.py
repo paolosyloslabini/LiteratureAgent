@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 
 import pytest
-from factories import make_entry
+import typer
+from factories import make_entry, make_meta
 from typer.testing import CliRunner
 
 from lit.actions.discover import Candidate, FindResult, SearchPlan
-from lit.cli import app, state
+from lit.cli import _prompt_selection, app, state
 from lit.library import Library
 
 runner = CliRunner()
@@ -185,6 +186,18 @@ def test_note_replace(stocked):
     run("note", "vaswani2017attention", "first")
     run("note", "vaswani2017attention", "second", "--replace")
     assert js(run("--json", "show", "vaswani2017attention"))["notes"] == "second"
+
+
+def test_note_without_an_editor_fails_cleanly(stocked, monkeypatch):
+    """A missing editor binary is a message, not an OSError traceback."""
+    def boom(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'nano'")
+
+    monkeypatch.setattr("lit.cli.subprocess.call", boom)
+    r = run("--json", "note", "vaswani2017attention")
+    assert r.exit_code != 0
+    assert not isinstance(r.exception, OSError)
+    assert "EDITOR" in js(r)["error"]
 
 
 def test_notes_survive_reindex(stocked):
@@ -371,6 +384,13 @@ def test_refresh_specific_key(stocked, monkeypatch):
     monkeypatch.setattr("lit.actions.refresh.resolve_metadata", lambda *a, **k: None)
     data = js(run("--json", "refresh", "vaswani2017attention"))
     assert [r["key"] for r in data["refreshed"]] == ["vaswani2017attention"]
+
+
+def test_refresh_unknown_key_fails(stocked):
+    """A typo must not look like a completed refresh."""
+    r = run("--json", "refresh", "nosuchkey")
+    assert r.exit_code != 0
+    assert "nosuchkey" in js(r)["error"]
 
 
 # --------------------------------------------------------------------------
@@ -584,6 +604,78 @@ def test_find_tags_what_it_files_with_the_plan_tags(stocked, monkeypatch):
     assert js(r)["plan"]["tags"] == ["benchmarks", "agents"]
 
 
+# --------------------------------------------------------------------------
+# The selection prompt: one typo must not throw away a search already paid for
+# --------------------------------------------------------------------------
+
+def _answers(monkeypatch, *replies):
+    """Feed the prompt a queue of typed answers, return the defaults it offered.
+
+    An exhausted queue raises `Abort`, which is what a piped stdin with nothing
+    left on it does.
+    """
+    offered, queue = [], list(replies)
+
+    def fake_prompt(text, default=None, **kw):
+        offered.append(default)
+        if not queue:
+            raise typer.Abort()
+        return queue.pop(0)
+
+    monkeypatch.setattr("typer.prompt", fake_prompt)
+    return offered
+
+
+def test_selection_asks_again_when_it_cannot_read_the_answer(monkeypatch):
+    """`1 3` collapses to `13` — worth a second question, not a lost search."""
+    cands = [Candidate(title=f"Paper {i}") for i in range(1, 5)]
+    offered = _answers(monkeypatch, "1 3", "1,3")
+    picked = _prompt_selection(cands)
+    assert len(offered) == 2
+    assert [c.title for c in picked] == ["Paper 1", "Paper 3"]
+
+
+def test_selection_asks_again_exactly_once(monkeypatch):
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "1;3", "still nonsense")
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 2
+
+
+def test_selection_gives_up_when_there_is_no_one_to_ask(monkeypatch):
+    """Piped in: the retry finds nothing on stdin and must not blow up."""
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "1;3")
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 2
+
+
+def test_selection_keeps_what_it_could_read(monkeypatch):
+    cands = [Candidate(title=f"Paper {i}") for i in range(1, 4)]
+    offered = _answers(monkeypatch, "1,zz,3")
+    picked = _prompt_selection(cands)
+    assert [c.title for c in picked] == ["Paper 1", "Paper 3"]
+    assert len(offered) == 1        # something was readable: no second question
+
+
+def test_selection_none_still_means_none(monkeypatch):
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "none")
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 1
+
+
+def test_selection_empty_answers_keep_their_meaning(monkeypatch):
+    cands = [Candidate(title="Paper 1")]
+    offered = _answers(monkeypatch, "all")   # a bare Enter takes the default
+    assert _prompt_selection(cands) == cands
+    assert offered == ["all"]
+
+    offered = _answers(monkeypatch, "   ")   # a blank line still means none
+    assert _prompt_selection(cands) == []
+    assert len(offered) == 1
+
+
 def test_read_needs_a_target(stocked):
     r = run("--json", "read")
     assert r.exit_code == 1
@@ -611,6 +703,55 @@ def test_read_all_picks_up_entries_with_no_summary(stocked, monkeypatch):
     assert set(asked["keys"]) == {"new2024unread", "doe2010obscure"}
 
 
+def test_read_all_still_filters_on_a_valid_level(stocked, monkeypatch):
+    stocked.save_entry(make_entry(
+        key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
+        one_liner=None, sections=[], status="unread",
+    ))
+    asked = {}
+    monkeypatch.setattr("lit.cli.read_entries",
+                        lambda ctx, entries: (asked.update(
+                            keys=[e.key for e in entries]), [])[1])
+    r = run("--json", "read", "--all", "--level", "A")
+    assert r.exit_code == 0
+    # The A* entry, not the C one.
+    assert asked["keys"] == ["new2024unread"]
+
+
+# A level the ranking does not know ranked worse than every real one, so
+# `level_rank(e.level) <= level_rank(level)` was true for the whole library and
+# the filter matched everything. On `read --all` that read the entire backlog.
+_LEVEL_ARGV = [
+    ("ls", "--level", "a"),
+    ("cite", "--level", "a"),
+    ("read", "--all", "--level", "a"),
+    ("code", "--all", "--level", "a"),
+    ("search", "attention", "--level", "a"),
+    ("ask", "what is attention?", "--level", "a"),
+    ("check", "--level", "a"),
+]
+
+
+@pytest.mark.parametrize("argv", _LEVEL_ARGV, ids=lambda a: a[0])
+def test_an_unknown_level_is_rejected_before_anything_expensive(
+        stocked, monkeypatch, argv):
+    spent = []
+    for name in ("read_entries", "find_code", "search_action", "ask_action",
+                 "check_entries"):
+        monkeypatch.setattr(f"lit.cli.{name}",
+                            lambda *a, _n=name, **k: (spent.append(_n), [])[1])
+    r = run("--json", *argv)
+    assert r.exit_code != 0
+    assert "--level must be one of" in js(r)["error"]
+    assert spent == []
+
+
+def test_config_set_rejects_an_unknown_min_level(stocked):
+    r = run("--json", "config", "set", "--library", "min_level", "a")
+    assert r.exit_code != 0
+    assert js(run("--json", "info"))["min_level"] == "C"
+
+
 def test_read_all_says_so_when_there_is_nothing_to_do(isolated):
     run("new", "mylib", "--scope", "s")
     lib = Library.open(isolated / "mylib")
@@ -620,6 +761,89 @@ def test_read_all_says_so_when_there_is_nothing_to_do(isolated):
     assert js(r)["read"] == []
 
 
+# --------------------------------------------------------------------------
+# Expensive commands say what they are doing, and ask before a batch
+# --------------------------------------------------------------------------
+
+def _staged_add(monkeypatch, title="A Brand New Paper"):
+    """Answer the metadata lookup, the download and the reader from memory."""
+    from lit.actions import add as add_action
+    from lit.fetch.fulltext import FullText
+
+    monkeypatch.setattr(add_action, "resolve_metadata",
+                        lambda *a, **k: make_meta(title=title, arxiv_id="2401.09999"))
+    monkeypatch.setattr(add_action, "fetch_fulltext",
+                        lambda *a, **k: FullText("FULL PAPER TEXT " * 100, "arxiv"))
+    _bill(monkeypatch, reply={
+        "one_liner": "A new paper.",
+        "sections": [{"name": "Introduction", "summary": "It begins."}],
+    })
+
+
+def test_add_says_what_it_is_doing_without_v(stocked, monkeypatch):
+    """Minutes of silence are indistinguishable from a hang, so -v is too late."""
+    _staged_add(monkeypatch)
+    out = run("add", "A Brand New Paper").stdout
+    assert "resolving metadata" in out
+    assert "fetching full text" in out
+    assert "chars via arxiv" in out
+
+
+def test_add_milestones_stay_out_of_json(stocked, monkeypatch):
+    """--json is parsed by scripts; progress on stdout would break them."""
+    _staged_add(monkeypatch)
+    r = run("--json", "add", "A Brand New Paper")
+    assert js(r)["status"] == "added"
+    assert "resolving metadata" not in r.stdout
+    assert "fetching full text" not in r.stdout
+
+
+@pytest.fixture
+def two_to_read(stocked, monkeypatch):
+    """Two entries needing a reader agent, with `read_entries` stubbed out."""
+    stocked.save_entry(make_entry(
+        key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
+        one_liner=None, sections=[], status="unread",
+    ))
+    asked = {}
+    monkeypatch.setattr("lit.cli.read_entries",
+                        lambda ctx, entries: (asked.update(
+                            keys=[e.key for e in entries]), [])[1])
+    return asked
+
+
+def test_read_all_asks_before_buying_a_batch(two_to_read):
+    """Declining leaves the backlog unread, and nothing was spent."""
+    r = runner.invoke(app, ["read", "--all"], input="n\n")
+    assert r.exit_code == 0
+    assert "Read 2 papers in full?" in r.stdout
+    assert "keys" not in two_to_read
+
+
+def test_read_all_reads_when_confirmed(two_to_read):
+    r = runner.invoke(app, ["read", "--all"], input="y\n")
+    assert r.exit_code == 0
+    assert len(two_to_read["keys"]) == 2
+
+
+def test_read_all_does_not_ask_under_yes(two_to_read):
+    r = runner.invoke(app, ["-y", "read", "--all"])  # no answer available
+    assert r.exit_code == 0
+    assert len(two_to_read["keys"]) == 2
+
+
+def test_read_all_does_not_ask_in_json(two_to_read):
+    r = run("--json", "read", "--all")
+    assert r.exit_code == 0
+    assert len(two_to_read["keys"]) == 2
+
+
+def test_read_of_a_single_paper_does_not_ask(two_to_read):
+    r = runner.invoke(app, ["read", "doe2010obscure"])  # no answer available
+    assert r.exit_code == 0
+    assert two_to_read["keys"] == ["doe2010obscure"]
+
+
 def test_ls_can_filter_for_unread(stocked):
     stocked.save_entry(make_entry(
         key="new2024unread", title="Filed But Unread", arxiv_id="2401.00001",
@@ -627,3 +851,29 @@ def test_ls_can_filter_for_unread(stocked):
     ))
     keys = [e["key"] for e in js(run("--json", "ls", "--status", "unread"))["entries"]]
     assert keys == ["new2024unread"]
+
+
+# --------------------------------------------------------------------------
+# `ask` says why a source could not be used, not just that it could not
+# --------------------------------------------------------------------------
+
+def test_ask_prints_why_each_source_could_not_be_read(stocked, monkeypatch):
+    """The keys alone read as a fault of the library; the reason has the fix in it."""
+    from lit.actions.ask import AskResult, Evidence
+
+    def fake_ask(ctx, question, **kw):
+        res = AskResult(question=question, answer="Nothing usable came back.")
+        res.consulted = ["vaswani2017attention", "doe2010obscure"]
+        res.evidence = [
+            Evidence(entry=stocked.get("vaswani2017attention"), relevant=False,
+                     error="full text no longer retrievable"),
+            Evidence(entry=stocked.get("doe2010obscure"), relevant=False,
+                     error="the `claude` CLI was not found"),
+        ]
+        res.unreadable = [ev.entry.key for ev in res.evidence]
+        return res
+
+    monkeypatch.setattr("lit.cli.ask_action", fake_ask)
+    out = run("ask", "a question").stdout
+    assert "vaswani2017attention: full text no longer retrievable" in out
+    assert "doe2010obscure: the `claude` CLI was not found" in out

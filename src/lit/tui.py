@@ -251,7 +251,10 @@ class BrowserApp(App):
     FILTERS = [
         ("all", lambda e: True),
         ("A* and A", lambda e: level_rank(e.level) <= level_rank("A")),
-        ("unread", lambda e: not e.is_verified),
+        # The read backlog, which is what `R` acts on: anything carrying no
+        # summary, unread and UNVERIFIED alike. Not called "unread", because
+        # `lit ls --status unread` gives that word to only one of the two.
+        ("not read", lambda e: e.needs_read),
         ("with notes", lambda e: bool(e.notes.strip())),
     ]
     SORTS = [

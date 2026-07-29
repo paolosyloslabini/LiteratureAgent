@@ -31,7 +31,6 @@ from ..models import (
     STATUS_UNVERIFIED,
     STATUS_VERIFIED,
     Entry,
-    Reference,
     Section,
     make_key,
     normalize_code_url,
@@ -45,11 +44,7 @@ from ..prompts import (
 )
 from ..quality import LevelVerdict, assess, passes_quality_bar
 from ..runner import run_parallel
-from .context import DEFAULT_READ_CHARS, Ctx, Target, parse_target
-
-# Kept as a name for callers that imported it. The live budget is
-# `Ctx.read_budget`, which reads `llm.read_chars`.
-MAX_PROMPT_CHARS = DEFAULT_READ_CHARS
+from .context import Ctx, Target, parse_target
 
 
 @dataclass
@@ -89,6 +84,7 @@ def add_paper(
     target: Target | None = None,
     read: bool = True,
     max_chars: int | None = None,
+    progress: bool = False,
 ) -> AddResult:
     """Resolve, vet, read and store one paper.
 
@@ -97,10 +93,17 @@ def add_paper(
     `unread`. No full text is fetched and no reader agent runs, so the whole
     thing costs nothing but a few API calls. `lit read <key>` fills in the
     summaries later, for the entries that turn out to be worth it.
+
+    `progress=True` puts the milestones on stdout instead of behind `-v`. That
+    is what `lit add` wants: one paper, a metadata lookup, a download and a
+    reader agent, and minutes of silence that look exactly like a hang. The
+    batch callers (`find`, `read`, `inbox`) leave it off — they run many of
+    these at once and already print a line per paper of their own.
     """
     lib = ctx.library
     warnings: list[str] = []
     target = target or parse_target(query)
+    say = ctx.log if progress else ctx.vlog
 
     # ---- 1. metadata -----------------------------------------------------
     # Remembered so a failure to resolve can say *why*: every index being
@@ -109,7 +112,7 @@ def add_paper(
     # fixing an input that was correct all along.
     unavailable_before = ctx.http.unavailable_count
     if meta is None:
-        ctx.vlog(f"resolving metadata for {target.describe()!r}")
+        say(f"resolving metadata for {target.describe()!r}")
         meta = resolve_metadata(
             ctx.http,
             doi=target.doi,
@@ -189,8 +192,12 @@ def add_paper(
     # expensive thing here — the same PDF, the same agent, the same answer, paid
     # for again because the entry lives in a different directory. If a sibling
     # library under the same root has already read this one, take its reading.
-    # `--refresh` still buys a fresh one.
-    if not refresh:
+    # `--refresh` still buys a fresh one — but only where there is a reading here
+    # to replace: the first read of an entry filed unread arrives with
+    # `refresh=True` (from `reread`) and has nothing of its own to refresh. A
+    # caller holding a PDF asked for *that* file to be read, and always gets it.
+    first_read = existing is not None and not existing.is_verified and local_pdf is None
+    if not refresh or first_read:
         found = _reading_elsewhere(ctx, meta)
         if found is not None:
             source_lib, done = found
@@ -210,7 +217,7 @@ def add_paper(
                 entry=saved, verdict=verdict, meta=meta, warnings=warnings,
             )
 
-    ctx.vlog(f"[{key}] fetching full text")
+    say(f"[{key}] fetching full text")
     ft = fetch_fulltext(
         ctx.http, meta,
         key=key,
@@ -227,15 +234,24 @@ def add_paper(
 
     if ft is None:
         entry.status = STATUS_UNVERIFIED
+        # A fetch that fails must not cost a reading already paid for: the
+        # entry keeps it, and only the retrieval is reported as having failed.
+        if existing:
+            _carry_reading(entry, existing)
+            _carry_code(entry, existing)
+        kept = entry.is_verified
         warnings.append(
-            "full text could not be retrieved — summaries left blank. "
-            f"Drop the PDF in {lib.inbox_dir} and run `lit inbox`, "
+            "full text could not be retrieved — "
+            + ("the reading already on record was kept."
+               if kept else "summaries left blank.")
+            + f" Drop the PDF in {lib.inbox_dir} and run `lit inbox`, "
             "or re-add with --pdf <file>."
         )
         saved = lib.save_entry(entry)
         return AddResult(
             "updated" if existing else "added",
-            f"[{key}] added as UNVERIFIED (no full text available)",
+            f"[{key}] kept its existing reading (no full text available)" if kept
+            else f"[{key}] added as UNVERIFIED (no full text available)",
             entry=saved, verdict=verdict, meta=meta, warnings=warnings,
         )
 
@@ -257,7 +273,7 @@ def add_paper(
             "The summary covers that sample, not the whole work. Raise the "
             "budget with `lit config set fetch.max_read_pages <n>`."
         )
-    ctx.vlog(f"[{key}] reading {len(text):,} chars via {ft.source}")
+    say(f"[{key}] reading {len(text):,} chars via {ft.source}")
 
     try:
         data = ctx.llm.json(
@@ -277,6 +293,13 @@ def add_paper(
         )
     except LLMError as exc:
         entry.status = STATUS_UNVERIFIED
+        # The text was in hand and only the reader fell over, so the reading
+        # already on record is still the best one there is: it stays. The fetch
+        # itself succeeded, so its own facts below are the fresh ones.
+        if existing:
+            _carry_reading(entry, existing)
+            _carry_code(entry, existing)
+        kept = entry.is_verified
         entry.read_source = ft.source
         entry.pdf_path = _rel(ft.pdf_path, lib.path)
         entry.text_chars = ft.chars
@@ -285,7 +308,8 @@ def add_paper(
         lib.save_entry(entry)
         return AddResult(
             "error",
-            f"[{key}] retrieved the full text but the reading step failed: {exc}",
+            f"[{key}] retrieved the full text but the reading step failed: {exc}"
+            + (" — the reading already on record was kept" if kept else ""),
             entry=entry, verdict=verdict, meta=meta, warnings=warnings,
         )
 
@@ -429,7 +453,7 @@ def _apply_reading(entry: Entry, data: dict, meta: PaperMeta,
     for s in entry.sections:
         s.summary = _clip_words(s.summary, SECTION_WORDS_CEILING)
     entry.key_findings = [
-        str(f).strip() for f in (data.get("key_findings") or []) if str(f).strip()
+        " ".join(str(f).split()) for f in (data.get("key_findings") or []) if str(f).strip()
     ][:MAX_KEY_FINDINGS]
 
     tags = _norm_tags(list(data.get("tags") or []) + list(extra_tags or []))
@@ -594,10 +618,3 @@ def read_entries(ctx: Ctx, entries: list[Entry]) -> list[AddResult]:
             entry: Entry = r.item  # type: ignore[assignment]
             out.append(AddResult("error", f"[{entry.key}] {r.error}"))
     return out
-
-
-def make_reference(meta: PaperMeta) -> Reference:
-    return Reference(
-        title=meta.title, year=meta.year, doi=meta.doi, arxiv_id=meta.arxiv_id,
-        authors=list(meta.authors),
-    )

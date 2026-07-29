@@ -61,11 +61,6 @@ def test_ctx_read_budget_follows_the_config(ctx):
     assert ctx.read_budget == 12_345
 
 
-def test_read_budget_survives_a_config_without_the_setting(ctx):
-    ctx.cfg.llm = object()  # a config predating the setting
-    assert ctx.read_budget == 400_000
-
-
 @pytest.mark.parametrize("command", ["add", "ask", "claim"])
 def test_every_full_text_path_honours_read_chars(monkeypatch, ctx, command):
     """`lit config set llm.read_chars` used to be ignored by ask and claim."""

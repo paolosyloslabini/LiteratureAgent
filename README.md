@@ -88,9 +88,11 @@ lit cite --level A --format bibtex -o refs.bib
 | `lit browse` | interactive two-pane browser |
 | `lit skill install` | install the Claude Code skill |
 
-Every command accepts `--json`. `-L <library>` targets a specific library, `-v`
-adds progress detail, and `--model` / `--effort` / `--workers` override the LLM
-settings for one invocation.
+Every command accepts `--json`. These are global flags, so they go *before* the
+subcommand — `lit --json ls`, not `lit ls --json`. Same for `-L <library>`, which
+targets a specific library, `-v`, which adds progress detail, and
+`--model` / `--effort` / `--workers`, which override the LLM settings for one
+invocation.
 
 ## How it works
 
@@ -135,8 +137,8 @@ Crossref/arXiv/Semantic Scholar. It is metadata rather than agent output, so it
 is present even on `UNVERIFIED` entries.
 
 ```bash
-lit abstract vaswani2017attention
-lit show vaswani2017attention --json | jq -r .abstract
+lit abstract vaswani2017attention        # plain text, pipeable
+lit --json show vaswani2017attention | jq -r .abstract
 ```
 
 A `code_url` is recorded only when the paper's own text prints one, checked
@@ -229,7 +231,7 @@ suspect fields against authoritative sources:
 ```bash
 lit check                     # audit the library, report only
 lit check --fix               # apply the corrections it can confirm
-lit check <key> --json
+lit --json check <key>
 ```
 
 Nothing is written without `--fix`, corrections are applied only to
@@ -326,8 +328,11 @@ fallback_url_template = ""  # last-resort resolver; see below
 fallback_cmd = ""
 ```
 
-Override per command with `--model`, `--effort` and `--workers` (`-j`), or per
-role with `LIT_MODEL_READER=opus` / `LIT_EFFORT_READER=high`.
+Override per command with `--model <alias>`, `--effort <level>` and `--workers N`
+(`-j`) — global flags too, so before the subcommand — or per role with
+`LIT_MODEL_READER=opus` / `LIT_EFFORT_READER=high`.
+`--workers` sets how many agents run at once; `lit find --parallel` is a
+different switch, deciding whether the scout agents run at all.
 
 `lit` states an effort on every call rather than inheriting `effortLevel` from
 your own `settings.json`, which is chosen for interactive work. Set

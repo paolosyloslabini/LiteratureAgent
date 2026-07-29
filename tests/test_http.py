@@ -112,6 +112,46 @@ def test_other_hosts_are_not_throttled(monkeypatch):
     assert time.monotonic() - start < 1.0
 
 
+def test_pdf_downloads_are_spaced_out_too(monkeypatch, tmp_path):
+    """PDFs are the highest-volume request we make, so they need the floor most.
+
+    `read --all -j 4` used to aim four unspaced workers at `arxiv.org`; the 403s
+    that came back were reported to the user as "no full text available".
+    """
+    monkeypatch.setitem(http_mod.HOST_MIN_INTERVAL, "arxiv.org", 0.05)
+    c = client_with(lambda req: httpx.Response(200, content=b"%PDF-1.4\n"))
+
+    start = time.monotonic()
+    for i in range(3):
+        assert c.download(f"https://arxiv.org/pdf/2401.0000{i}", tmp_path / f"{i}.pdf")
+    elapsed = time.monotonic() - start
+
+    # Three requests means two enforced gaps; the first is free.
+    assert elapsed >= 0.10
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_turned_away_pdf_is_an_outage_not_a_missing_pdf(status, tmp_path):
+    c = client_with(lambda req: httpx.Response(status))
+    assert c.download("https://arxiv.org/pdf/2401.00001", tmp_path / "p.pdf") is False
+    assert c.unavailable_count == 1
+
+
+def test_a_missing_pdf_is_still_an_answer(tmp_path):
+    c = client_with(lambda req: httpx.Response(404))
+    assert c.download("https://arxiv.org/pdf/2401.00001", tmp_path / "p.pdf") is False
+    assert c.unavailable_count == 0
+
+
+def test_a_connection_error_mid_download_is_an_outage(tmp_path):
+    def boom(req):
+        raise httpx.ConnectError("no route to host")
+
+    c = client_with(boom)
+    assert c.download("https://arxiv.org/pdf/2401.00001", tmp_path / "p.pdf") is False
+    assert c.unavailable_count == 1
+
+
 def test_the_throttle_holds_across_threads(monkeypatch):
     """The client is shared by `find`'s workers, so the gap must be global.
 

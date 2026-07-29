@@ -581,7 +581,9 @@ def resolve_metadata(
 
     if not doi and not arxiv_id and title:
         found = search_works(http, title, limit=5, cfg=cfg)
-        best = _best_title_match(title, found)
+        # Strict, because what comes back becomes the work's identity: a loose
+        # match here files a different paper under the requested title.
+        best = _best_title_match(title, found, threshold=0.85)
         if best:
             doi = best.doi
             meta = best if meta is None else meta.merge(best)

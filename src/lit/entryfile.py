@@ -99,7 +99,11 @@ def dumps(entry: Entry) -> str:
         parts.append(f"\n## Abstract\n\n{entry.abstract.strip()}\n")
 
     if entry.key_findings:
-        findings = "\n".join(f"- {f.strip()}" for f in entry.key_findings if f.strip())
+        # One finding, one line: `_bullets` keeps only lines that open a bullet,
+        # so an embedded newline would drop everything after it on the next load.
+        findings = "\n".join(
+            f"- {' '.join(f.split())}" for f in entry.key_findings if f.strip()
+        )
         parts.append(f"\n## Key findings\n\n{findings}\n")
 
     if entry.sections:

@@ -114,13 +114,19 @@ def read_paper_prompt(
         "tags": ["string — 3-8 lowercase topical keywords, single words or "
                  "hyphenated-phrases"],
         "type": f"string — one of: {', '.join(ENTRY_TYPES)}",
-        "venue_from_text": "string|null — the venue stated in the paper itself, "
-                           "if any (look at the header/footer/first page)",
         "code_url": "string|null — the code or artifact repository this document "
                     "links to (GitHub, GitLab, Hugging Face, Zenodo, OSF, Code "
                     "Ocean and the like), copied character-for-character from "
                     "the text. null if it does not give one.",
     }
+    # Only worth hunting for when the metadata APIs came back without one. The
+    # caller discards this field whenever it already has a venue, so asking for
+    # it on a resolved record buys a header search whose answer is thrown away.
+    if not known_venue:
+        schema["venue_from_text"] = (
+            "string|null — the venue stated in the paper itself, "
+            "if any (look at the header/footer/first page)"
+        )
     if needs_level:
         schema["level"] = "string — one of A*, A, B, C"
         schema["level_reason"] = (
@@ -272,7 +278,6 @@ def discover_prompt(*, query: str, scope: str, angle: str, limit: int,
         "papers": [
             {
                 "title": "string — the exact published title",
-                "authors": ["string"],
                 "year": "number|null",
                 "venue": "string|null — the venue acronym or journal name",
                 "doi": "string|null — bare DOI, e.g. 10.1145/3292500.3330701",
@@ -495,7 +500,6 @@ def extract_evidence_prompt(*, question: str, entry: Entry, truncated: bool) -> 
             {
                 "text": "string — copied VERBATIM from the document, 1-3 sentences",
                 "section": "string|null — which section it came from",
-                "supports": "string — what point this quote establishes",
             }
         ],
         "caveats": ["string — limitations of this evidence: scope, scale, "
@@ -569,10 +573,15 @@ def synthesize_answer_prompt(*, question: str, scope: str, evidence: list[dict])
 
 def claim_origin_prompt(*, claim: str, entry: Entry, references: list,
                         truncated: bool) -> str:
+    # A survey drags 300+ references in behind it, and every one of them is
+    # paid for at every hop of the trace. The model is asked for at most 3
+    # attributions and the caller keeps at most a handful, so the tail of a
+    # long bibliography is bought and never used. The slice is a prefix, so
+    # [i] still names the same reference the caller looks up by index.
     ref_lines = "\n".join(
         f"  [{i}] {r.title}" + (f" ({r.year})" if r.year else "")
         + (f" doi:{r.doi}" if r.doi else "")
-        for i, r in enumerate(references)
+        for i, r in enumerate(references[:80])
     )
     schema = {
         "states_claim": "boolean — does this document itself assert the claim?",
@@ -585,7 +594,6 @@ def claim_origin_prompt(*, claim: str, entry: Entry, references: list,
             {
                 "index": "number — the [i] index from the reference list below",
                 "confidence": "number 0-1",
-                "why": "string — the citation context that points here",
             }
         ],
         "reasoning": "string — two sentences on how you decided",
@@ -624,11 +632,8 @@ def find_claim_source_prompt(*, claim: str, scope: str) -> str:
         "papers": [
             {
                 "title": "string",
-                "authors": ["string"],
-                "year": "number|null",
                 "doi": "string|null",
                 "arxiv_id": "string|null",
-                "why": "string — why this paper is a good place to start tracing",
             }
         ]
     }
@@ -679,8 +684,6 @@ def find_code_prompt(*, title: str, authors: list[str], year: int | None,
                     "repository to THIS paper, quoted from the page. Say where "
                     "you saw it (repo README, arXiv page, project site).",
         "confidence": "string — high, medium or low",
-        "searched": ["string — a query or URL you actually tried, so a failed "
-                     "search says what was already ruled out"],
     }
 
     return "\n".join(filter(None, [
@@ -835,7 +838,12 @@ def _entry_card(e: Entry, *, brief: bool = False) -> str:
     outside of reading a paper.
     """
     limit = 3 if brief else 5
-    findings = "\n".join(f"    - {_snippet(f, 160) if brief else f}"
+    # Findings and the one-liner are stored exactly as the reader wrote them,
+    # unlike section summaries, which are clipped on the way in. One verbose
+    # reading therefore costs its length again in every later prompt that
+    # ranks the library. 240 is half again the brief cap and well past any
+    # finding the reader is asked for — one checkable result with its number.
+    findings = "\n".join(f"    - {_snippet(f, 160 if brief else 240)}"
                          for f in e.key_findings[:limit])
     # Sections are the cheapest signal on the card and by far the most
     # expensive: unabridged they are ~70% of a saturated card, yet they are
@@ -861,7 +869,7 @@ def _entry_card(e: Entry, *, brief: bool = False) -> str:
                     f"{_snippet(e.abstract, 240 if brief else 1500)}")
     return "\n".join(filter(None, [
         f"[{e.key}] {e.title} — {e.citation()} (level {e.level}, {e.type})",
-        f"  One-liner: {e.one_liner or '(none — not read yet)'}",
+        f"  One-liner: {_snippet(e.one_liner, 200) or '(none — not read yet)'}",
         stand_in,
         f"  Tags: {', '.join(e.tags)}" if e.tags else "",
         f"  Key findings:\n{findings}" if findings else "",

@@ -325,6 +325,8 @@ def cmd_config(
         lib = _lib()
         if not hasattr(lib.settings, key):
             _fail(f"unknown library setting {key!r}")
+        if key == "min_level" and value and value not in LEVELS and value != "any":
+            _fail(f"min_level must be one of {LEVELS} or 'any'")
         cur = getattr(lib.settings, key)
         setattr(lib.settings, key, _coerce(value, cur))
         lib.save_settings()
@@ -395,7 +397,7 @@ def cmd_add(
     ctx = _ctx()
     try:
         res = add_paper(ctx, query, local_pdf=pdf, force=force, refresh=refresh,
-                        extra_tags=list(tag), read=not no_read)
+                        extra_tags=list(tag), read=not no_read, progress=True)
         if res.entry:
             link_references(ctx, res.entry)
     finally:
@@ -571,7 +573,7 @@ def _print_candidates(candidates, found) -> None:
     console.print(t)
 
 
-def _prompt_selection(candidates):
+def _prompt_selection(candidates, retry: bool = True):
     console.print(
         "\nAdd which? [cyan]all[/cyan] / [cyan]none[/cyan] / numbers like "
         "[cyan]1,3,5-7[/cyan]"
@@ -601,6 +603,17 @@ def _prompt_selection(candidates):
         if id(c) not in seen:
             seen.add(id(c))
             out.append(c)
+    # A typo ("1 3" collapses to "13", "1;3" reads as nothing) would otherwise
+    # throw away a search that has already been paid for. Ask once more.
+    if not out and retry:
+        console.print(
+            f"[yellow]Could not read selection {raw!r}[/yellow] — nothing "
+            f"selected yet."
+        )
+        try:
+            return _prompt_selection(candidates, retry=False)
+        except typer.Abort:      # piped in: no second answer to read
+            return []
     return out
 
 
@@ -623,6 +636,8 @@ def cmd_read(
     papers from their metadata for almost nothing, and you spend a reader agent
     only on the ones that earned it.
     """
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         lib = ctx.library
@@ -658,6 +673,13 @@ def cmd_read(
             else:
                 console.print(f"[dim]{msg}[/dim]")
             return
+
+        # One reader agent per paper, and `--all` has no cap of its own, so a
+        # batch is the most expensive thing this tool can be asked to do.
+        # --json means nobody is at the terminal to answer, so it does not prompt.
+        if len(wanted) > 1 and not (state.yes or state.json_mode):
+            if not typer.confirm(f"Read {len(wanted)} papers in full?"):
+                raise typer.Exit(0)
 
         results = read_entries(ctx, wanted)
     finally:
@@ -713,7 +735,11 @@ def cmd_refresh(
     ctx = _ctx()
     try:
         # A variadic Argument with no value arrives as None, not [].
-        results = refresh_entries(ctx, list(keys or []) or None, relevel=not no_relevel)
+        wanted = list(keys or [])
+        missing = [k for k in wanted if ctx.library.get(k) is None]
+        if missing:
+            _fail(f"no entry with key(s): {', '.join(missing)}")
+        results = refresh_entries(ctx, wanted or None, relevel=not no_relevel)
     finally:
         ctx.close()
 
@@ -760,6 +786,8 @@ def cmd_code(
     only when the paper's own text prints one; this goes looking for the rest.
     What it finds is stored marked as web-found, never as the paper's own.
     """
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         lib = ctx.library
@@ -855,6 +883,8 @@ def cmd_check(
     Reports by default. `--fix` writes, and only ever to bibliographic fields:
     summaries, abstracts and your notes are never touched.
     """
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         lib = ctx.library
@@ -967,6 +997,8 @@ def cmd_ls(
     limit: int = typer.Option(200, "-n", "--limit"),
 ):
     """List entries in the library."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     lib = _lib()
     entries = lib.entries()
 
@@ -1072,7 +1104,11 @@ def cmd_note(
         tmp = lib.path / f".note-{key}.md"
         tmp.write_text(entry.notes, encoding="utf-8")
         try:
-            subprocess.call([editor, str(tmp)])
+            try:
+                subprocess.call([editor, str(tmp)])
+            except OSError as exc:
+                _fail(f"could not start editor {editor!r}: {exc}. Set $EDITOR, "
+                      f'or pass the note text: lit note {key} "..."')
             new = tmp.read_text(encoding="utf-8").strip()
         finally:
             tmp.unlink(missing_ok=True)
@@ -1166,6 +1202,8 @@ def cmd_search(
                              help="Skip LLM ranking; return bm25 order only."),
 ):
     """Find in-library sources for a query, with a short answer from summaries."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         res = search_action(ctx, query, limit=limit, level=level, tag=tag,
@@ -1212,6 +1250,8 @@ def cmd_ask(
                                         help="Write the answer to a Markdown file."),
 ):
     """Answer a question by reading the actual papers, with quotes and a bibliography."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         res = ask_action(ctx, question, read=read, expand=expand, level=level, tag=tag)
@@ -1227,7 +1267,13 @@ def cmd_ask(
     if res.pulled:
         console.print(f"[dim]Pulled into the library: {', '.join(res.pulled)}[/dim]")
     if res.unreadable:
-        console.print(f"[yellow]Could not read: {', '.join(res.unreadable)}[/yellow]")
+        # The keys alone read as a fault of the library. Each Evidence carries
+        # why that source could not be used — a paywall, a missing PDF, an LLM
+        # call that failed — and that is the part with a next step in it.
+        console.print(f"[yellow]Could not read {len(res.unreadable)} source(s):[/yellow]")
+        for ev in res.evidence:
+            if ev.error:
+                console.print(f"  [yellow]·[/yellow] {ev.entry.key}: {ev.error}")
 
     if save:
         save.write_text(_answer_markdown(res), encoding="utf-8")
@@ -1304,6 +1350,8 @@ def cmd_cite(
     out: Optional[Path] = typer.Option(None, "-o", "--out", help="Write to a file."),
 ):
     """Emit citations for entries — BibTeX for a paper, Markdown for notes."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     lib = _lib()
     entries = [e for e in (lib.get(k) for k in (keys or [])) if e] if keys \
         else lib.entries()
