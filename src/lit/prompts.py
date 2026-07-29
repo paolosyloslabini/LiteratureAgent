@@ -105,13 +105,19 @@ def read_paper_prompt(
         "tags": ["string — 3-8 lowercase topical keywords, single words or "
                  "hyphenated-phrases"],
         "type": f"string — one of: {', '.join(ENTRY_TYPES)}",
-        "venue_from_text": "string|null — the venue stated in the paper itself, "
-                           "if any (look at the header/footer/first page)",
         "code_url": "string|null — the code or artifact repository this document "
                     "links to (GitHub, GitLab, Hugging Face, Zenodo, OSF, Code "
                     "Ocean and the like), copied character-for-character from "
                     "the text. null if it does not give one.",
     }
+    # Only worth hunting for when the metadata APIs came back without one. The
+    # caller discards this field whenever it already has a venue, so asking for
+    # it on a resolved record buys a header search whose answer is thrown away.
+    if not known_venue:
+        schema["venue_from_text"] = (
+            "string|null — the venue stated in the paper itself, "
+            "if any (look at the header/footer/first page)"
+        )
     if needs_level:
         schema["level"] = "string — one of A*, A, B, C"
         schema["level_reason"] = (
