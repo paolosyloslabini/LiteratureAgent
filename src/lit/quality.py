@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from .fetch.metadata import PaperMeta
+from .venue import clean_venue, is_placeholder, is_workshop
 
 # (level, canonical name, regex matched against the venue string)
 _VENUE_TABLE: list[tuple[str, str, str]] = [
@@ -123,12 +124,21 @@ class LevelVerdict:
 
 
 def venue_level(venue: str | None) -> tuple[str, str] | None:
-    """Look a venue up in the curated table. Returns (level, canonical name)."""
-    if not venue:
+    """Look a venue up in the curated table. Returns (level, canonical name).
+
+    Two things are refused before the table is consulted, because the patterns
+    here are substring matches and both would score against them:
+
+    * A workshop or satellite track, which never inherits its parent
+      conference's rank. "NeurIPS 2023 Workshop on Instruction Tuning" contains
+      the A* pattern for NeurIPS.
+    * A string that names a publisher or a preprint server rather than a venue.
+      "Nature Portfolio" is a publisher, and it matches the `^nature\\s` pattern
+      that is there for the journal.
+    """
+    v = clean_venue(venue)
+    if not v or is_workshop(v) or is_placeholder(v):
         return None
-    v = re.sub(r"\s+", " ", venue).strip()
-    if _is_workshop(v):
-        return None  # workshops are handled separately, never inherit venue rank
     for lvl, name, pat in _COMPILED:
         if pat.search(v):
             return lvl, name
@@ -152,7 +162,7 @@ def assess(meta: PaperMeta, *, today_year: int | None = None) -> LevelVerdict:
     # Workshop papers and preprints have no venue rank to inherit; they earn a
     # level purely through citation velocity, and are capped below A* unless
     # they are genuinely landmark.
-    is_soft_venue = meta.type in ("workshop paper", "preprint") or _is_workshop(meta.venue)
+    is_soft_venue = meta.type in ("workshop paper", "preprint") or is_workshop(meta.venue)
 
     if vhit and not is_soft_venue:
         lvl, name = vhit
@@ -239,7 +249,3 @@ def rubric_text() -> str:
         "affiliation, methodological rigour, whether code/data are released, size and "
         "honesty of the evaluation, and whether the claims are supported."
     )
-
-
-def _is_workshop(venue: str | None) -> bool:
-    return bool(re.search(r"\bworkshop\b|\bwork-?shop\b", venue or "", re.IGNORECASE))
