@@ -9,7 +9,12 @@ must survive inside it.
 from factories import make_entry
 
 from lit.models import Reference, Section
-from lit.prompts import _entry_card, claim_origin_prompt, library_search_prompt
+from lit.prompts import (
+    _entry_card,
+    claim_origin_prompt,
+    library_search_prompt,
+    read_paper_prompt,
+)
 
 
 def _filler(n: int, word: str = "part") -> str:
@@ -94,6 +99,32 @@ def test_unread_card_is_still_bounded():
     e = make_entry(one_liner=None, sections=[], key_findings=[],
                    abstract=_filler(20_000))
     assert len(_entry_card(e)) < 2_200
+
+
+# --------------------------------------------------------------------------
+# Reading — don't pay to re-derive metadata the caller already has
+# --------------------------------------------------------------------------
+
+def _read_prompt(**kw) -> str:
+    base = dict(title="A Paper", scope="ml", known_venue=None, known_year=None,
+                truncated=False, needs_level=False)
+    return read_paper_prompt(**{**base, **kw})
+
+
+def test_venue_is_asked_for_when_the_metadata_apis_had_none():
+    assert "venue_from_text" in _read_prompt(known_venue=None)
+
+
+def test_venue_is_not_asked_for_when_it_is_already_known():
+    """`_apply_reading` drops this field unless the venue slot is empty.
+
+    On the common path — a record the metadata APIs resolved — asking for it
+    buys a search through the header for a string that is then discarded.
+    """
+    prompt = _read_prompt(known_venue="NeurIPS", known_year=2017)
+    assert "venue_from_text" not in prompt
+    assert "header/footer" not in prompt
+    assert "NeurIPS" in prompt  # still told what the venue is
 
 
 def test_a_verbose_reading_cannot_inflate_every_later_ranking_prompt():
