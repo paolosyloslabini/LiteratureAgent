@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import re
+
 import yaml
 
 from lit.skillfile import SKILL_BODY, install_skill
+
+# Declared on `@app.callback()`, so Typer only accepts them before the subcommand.
+GLOBAL_FLAGS = ["--json", "-L", "--library", "-v", "--verbose", "-y", "--yes",
+                "--model", "--effort", "--workers", "-j"]
+
+POST_SUBCOMMAND = re.compile(
+    r"^lit\s+(?!-)\S+.*?\s(" + "|".join(re.escape(f) for f in GLOBAL_FLAGS) + r")(?=\s|$)",
+    re.MULTILINE,
+)
 
 
 def frontmatter() -> dict:
@@ -26,14 +37,20 @@ def test_description_carries_trigger_phrases():
 
 
 def test_skill_documents_every_verb_an_agent_needs():
-    for cmd in ["lit libs", "lit info", "lit ls", "lit show", "lit search",
-                "lit ask", "lit add", "lit find", "lit cite", "lit claim",
-                "lit export", "lit import", "lit inbox"]:
-        assert cmd in SKILL_BODY
+    for verb in ["libs", "info", "ls", "show", "search", "ask", "add", "find",
+                 "cite", "claim", "export", "import", "inbox"]:
+        assert re.search(rf"lit (--json )?{verb}\b", SKILL_BODY), verb
 
 
 def test_skill_states_the_json_contract():
     assert "--json" in SKILL_BODY
+
+
+def test_skill_writes_global_flags_before_the_subcommand():
+    """`lit ls --json` exits 2 with "No such option"; only `lit --json ls` runs."""
+    bad = [m.group(0).strip() for m in POST_SUBCOMMAND.finditer(SKILL_BODY)]
+    assert not bad, f"global flag written after the subcommand: {bad}"
+    assert "go before the subcommand" in SKILL_BODY
 
 
 def test_skill_protects_user_notes():
