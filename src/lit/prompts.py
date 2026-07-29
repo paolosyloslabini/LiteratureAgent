@@ -560,10 +560,15 @@ def synthesize_answer_prompt(*, question: str, scope: str, evidence: list[dict])
 
 def claim_origin_prompt(*, claim: str, entry: Entry, references: list,
                         truncated: bool) -> str:
+    # A survey drags 300+ references in behind it, and every one of them is
+    # paid for at every hop of the trace. The model is asked for at most 3
+    # attributions and the caller keeps at most a handful, so the tail of a
+    # long bibliography is bought and never used. The slice is a prefix, so
+    # [i] still names the same reference the caller looks up by index.
     ref_lines = "\n".join(
         f"  [{i}] {r.title}" + (f" ({r.year})" if r.year else "")
         + (f" doi:{r.doi}" if r.doi else "")
-        for i, r in enumerate(references)
+        for i, r in enumerate(references[:80])
     )
     schema = {
         "states_claim": "boolean — does this document itself assert the claim?",
@@ -739,7 +744,12 @@ def _entry_card(e: Entry, *, brief: bool = False) -> str:
     outside of reading a paper.
     """
     limit = 3 if brief else 5
-    findings = "\n".join(f"    - {_snippet(f, 160) if brief else f}"
+    # Findings and the one-liner are stored exactly as the reader wrote them,
+    # unlike section summaries, which are clipped on the way in. One verbose
+    # reading therefore costs its length again in every later prompt that
+    # ranks the library. 240 is half again the brief cap and well past any
+    # finding the reader is asked for — one checkable result with its number.
+    findings = "\n".join(f"    - {_snippet(f, 160 if brief else 240)}"
                          for f in e.key_findings[:limit])
     # Sections are the cheapest signal on the card and by far the most
     # expensive: unabridged they are ~70% of a saturated card, yet they are
@@ -765,7 +775,7 @@ def _entry_card(e: Entry, *, brief: bool = False) -> str:
                     f"{_snippet(e.abstract, 240 if brief else 1500)}")
     return "\n".join(filter(None, [
         f"[{e.key}] {e.title} — {e.citation()} (level {e.level}, {e.type})",
-        f"  One-liner: {e.one_liner or '(none — not read yet)'}",
+        f"  One-liner: {_snippet(e.one_liner, 200) or '(none — not read yet)'}",
         stand_in,
         f"  Tags: {', '.join(e.tags)}" if e.tags else "",
         f"  Key findings:\n{findings}" if findings else "",
