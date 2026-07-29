@@ -324,6 +324,8 @@ def cmd_config(
         lib = _lib()
         if not hasattr(lib.settings, key):
             _fail(f"unknown library setting {key!r}")
+        if key == "min_level" and value and value not in LEVELS and value != "any":
+            _fail(f"min_level must be one of {LEVELS} or 'any'")
         cur = getattr(lib.settings, key)
         setattr(lib.settings, key, _coerce(value, cur))
         lib.save_settings()
@@ -622,6 +624,8 @@ def cmd_read(
     papers from their metadata for almost nothing, and you spend a reader agent
     only on the ones that earned it.
     """
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         lib = ctx.library
@@ -759,6 +763,8 @@ def cmd_code(
     only when the paper's own text prints one; this goes looking for the rest.
     What it finds is stored marked as web-found, never as the paper's own.
     """
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         lib = ctx.library
@@ -875,6 +881,8 @@ def cmd_ls(
     limit: int = typer.Option(200, "-n", "--limit"),
 ):
     """List entries in the library."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     lib = _lib()
     entries = lib.entries()
 
@@ -1074,6 +1082,8 @@ def cmd_search(
                              help="Skip LLM ranking; return bm25 order only."),
 ):
     """Find in-library sources for a query, with a short answer from summaries."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         res = search_action(ctx, query, limit=limit, level=level, tag=tag,
@@ -1120,6 +1130,8 @@ def cmd_ask(
                                         help="Write the answer to a Markdown file."),
 ):
     """Answer a question by reading the actual papers, with quotes and a bibliography."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     ctx = _ctx()
     try:
         res = ask_action(ctx, question, read=read, expand=expand, level=level, tag=tag)
@@ -1212,6 +1224,8 @@ def cmd_cite(
     out: Optional[Path] = typer.Option(None, "-o", "--out", help="Write to a file."),
 ):
     """Emit citations for entries — BibTeX for a paper, Markdown for notes."""
+    if level and level not in LEVELS:
+        _fail(f"--level must be one of {LEVELS}")
     lib = _lib()
     entries = [e for e in (lib.get(k) for k in (keys or [])) if e] if keys \
         else lib.entries()
