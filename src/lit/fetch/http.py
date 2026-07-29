@@ -209,10 +209,21 @@ class HttpClient:
 
     def download(self, url: str, dest, *, max_mb: int | None = None,
                  headers: dict | None = None) -> bool:
-        """Stream a URL to `dest`. Returns False on any failure or size overrun."""
+        """Stream a URL to `dest`. Returns False on any failure or size overrun.
+
+        PDFs are the highest-volume request the tool makes — `read --all -j 4`
+        aims four workers at `arxiv.org` at once — so this obeys the same
+        per-host floor as `get`, and counts a host that turned us away the same
+        way, or the caller reports "no full text available" for a paper whose
+        PDF was merely rate-limited.
+        """
         max_bytes = (max_mb or self.cfg.max_pdf_mb) * 1024 * 1024
+        self._throttle(url)
         try:
             with self._client.stream("GET", url, headers=headers) as r:
+                if r.status_code in (429, 500, 502, 503, 504):
+                    self._note_unavailable()
+                    return False
                 if r.status_code >= 400:
                     return False
                 total = 0
@@ -231,5 +242,11 @@ class HttpClient:
                     return False
                 tmp.replace(dest)
                 return True
-        except (httpx.HTTPError, OSError):
+        except httpx.HTTPError:
+            # arXiv answers a burst by stalling until our timeout fires rather
+            # than by saying 429, so this is the shape most refusals arrive in.
+            self._note_unavailable()
+            return False
+        except OSError:
+            # A local disk problem says nothing about the host.
             return False
